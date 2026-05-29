@@ -4,11 +4,11 @@ swtab is a header-only C99 Swiss table hash map.
 
 ## Features
 
-- **Fast** — SWAR group scanning checks 8 slots per step; benchmarks show 3-5x faster lookups than chained hash maps at scale ([see benchmarks](#benchmarks))
-- **Cache-friendly** — flat, contiguous layout minimizes pointer chasing and cache misses
-- **Header-only** — single file, no build system integration, no dependencies beyond the C standard library
-- **Generic** — stores `void *` pointers; works with any data type
-- **Small** — ~9 bytes/entry overhead at typical load factors
+- **Fast**: SWAR group scanning checks 8 slots per step; benchmarks show 3-5x faster lookups than chained hash maps at scale ([see benchmarks](#benchmarks))
+- **Cache-friendly**: flat, contiguous layout minimizes pointer chasing and cache misses
+- **Header-only**: single file, no build system integration, no dependencies beyond the C standard library
+- **Generic**: stores `void *` pointers; works with any data type
+- **Small**: ~9 bytes/entry overhead at typical load factors
 
 ## Usage
 
@@ -18,7 +18,7 @@ Copy `swtab.h` into your project and include it:
 #include "swtab.h"
 ```
 
-No build system integration needed — single header, no dependencies beyond the C standard library.
+No build system integration needed: single header, no dependencies beyond the C standard library.
 
 ## Quick Example
 
@@ -90,12 +90,12 @@ make bench
 ## Benchmarks
 
 All numbers below are from a single machine and will vary by hardware.
-Run `make bench` to reproduce on yours — the benchmark includes hardware
+Run `make bench` to reproduce on yours: the benchmark includes hardware
 performance counters (L1/LLC misses, instructions, branch mispredictions)
 when available via `perf_event_open`.
 
 The benchmark compares swtab against a chained hash map (separate chaining
-with linked lists, similar to OVS's hmap). Adding your own implementation
+with linked lists). Adding your own implementation
 is straightforward: write an `impl_foo.h` adapter with the `bench_impl`
 vtable and add it to the `impls[]` array in `bench/bench.c`.
 
