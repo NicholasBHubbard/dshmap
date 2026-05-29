@@ -113,7 +113,10 @@ typedef swtab_hash_t (*swtab_hash_fn)(const void *entry);
 /* swtab_key_eq_fn - Key equality function signature.
  *
  * Compares a table entry with a lookup key. Return true when the entry
- * matches the key. Used by swtab_find_key() to resolve hash collisions.
+ * matches the key. Key equality must be compatible with the lookup hash:
+ * when eq_fn(entry, key) is true, hash_fn(entry) must equal the hash
+ * passed to swtab_find_key(). Used by swtab_find_key() to resolve hash
+ * collisions.
  *
  *     bool my_eq(const void *entry, const void *key) {
  *         const struct my_obj *obj = entry;
@@ -261,10 +264,11 @@ swtab_find(const swtab *st, swtab_hash_t hash);
  *
  * Returns the first entry whose hash matches and for which eq_fn(entry,
  * key) returns true, or NULL if none. Use swtab_find_key_next() to
- * continue through additional key-equal entries. This is the key-aware
- * version of swtab_find(); use swtab_find() when hash equality alone is
- * enough or when the caller wants to iterate all same-hash candidates
- * manually.
+ * continue through additional key-equal entries. Key equality is the
+ * final candidate check; swtab_find_key() does not recompute every
+ * candidate's full hash. This is the key-aware version of swtab_find();
+ * use swtab_find() when hash equality alone is enough or when the caller
+ * wants to iterate all same-hash candidates manually.
  *
  *     const char *name = "foo";
  *     swtab_hash_t hash = hash_name(name);
@@ -280,7 +284,8 @@ swtab_find_key(const swtab *st, swtab_hash_t hash, const void *key,
  * eq_fn(entry, key) returns true, or NULL if there are no more. 'prev'
  * must be a pointer previously returned by swtab_find_key() or
  * swtab_find_key_next() for the same hash and key. This is the
- * key-aware counterpart to swtab_find_next().
+ * key-aware counterpart to swtab_find_next(). Uses the same
+ * hash/equality compatibility contract as swtab_find_key().
  *
  *     swtab_hash_t h = hash_name(name);
  *     for (void *e = swtab_find_key(&st, h, name, my_eq);
@@ -699,8 +704,7 @@ swtab_find_key(const swtab *st, swtab_hash_t hash, const void *key,
         uint64_t match = swtab__ctrl_match(ctrl, h2);
         while (match) {
             size_t pos = swtab__slot_pos(index, swtab__ctrl_next_match(&match));
-            if (st->hash_fn(st->slots[pos]) == hash &&
-                eq_fn(st->slots[pos], key)) {
+            if (eq_fn(st->slots[pos], key)) {
                 return st->slots[pos];
             }
         }
@@ -728,8 +732,7 @@ swtab_find_key_next(const swtab *st, swtab_hash_t hash, const void *key,
                 }
                 continue;
             }
-            if (st->hash_fn(st->slots[pos]) == hash &&
-                eq_fn(st->slots[pos], key)) {
+            if (eq_fn(st->slots[pos], key)) {
                 return st->slots[pos];
             }
         }
