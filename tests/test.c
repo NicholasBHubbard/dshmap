@@ -104,17 +104,21 @@ test_duplicate_hashes(void)
     assert(swtab_size(&st) == 3);
 
     bool found_a = false, found_b = false, found_c = false;
+    size_t found_count = 0;
+    void *last = NULL;
     void *e = swtab_find(&st, hash);
     while (e) {
+        found_count++;
+        last = e;
         if (e == a) found_a = true;
         else if (e == b) found_b = true;
         else if (e == c) found_c = true;
         e = swtab_find_next(&st, hash, e);
     }
     assert(found_a && found_b && found_c);
-
-    assert(swtab_find_next(&st, hash, c) == NULL ||
-           swtab_find_next(&st, hash, c) != NULL);
+    assert(found_count == 3);
+    assert(last != NULL);
+    assert(swtab_find_next(&st, hash, last) == NULL);
 
     swtab_destroy(&st);
 }
