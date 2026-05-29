@@ -318,8 +318,8 @@ swtab_find_next(const swtab *st, swtab_hash_t hash, const void *prev);
  * order is arbitrary and not related to insertion order. Do not insert
  * or remove entries during iteration.
  *
- * Skips empty groups in bulk using SWAR, so iteration cost scales with
- * the number of entries, not the table capacity.
+ * Scans control groups using SWAR and visits occupied slots. Iteration
+ * cost is affected by allocated table capacity and entry distribution.
  *
  *     SWTAB_FOR_EACH(entry, &st) {
  *         printf("%s\n", ((struct my_obj *)entry)->name);
