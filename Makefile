@@ -4,13 +4,17 @@ ASANFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 .PHONY: test test-asan bench coverage clean
 
-test: tests/test.c swtab.h
+test: tests/test.c tests/test_oom.c swtab.h
 	$(CC) $(CFLAGS) -o tests/test tests/test.c
 	./tests/test
+	$(CC) $(CFLAGS) -o tests/test-oom tests/test_oom.c
+	./tests/test-oom
 
-test-asan: tests/test.c swtab.h
+test-asan: tests/test.c tests/test_oom.c swtab.h
 	$(CC) $(CFLAGS) $(ASANFLAGS) -o tests/test-asan tests/test.c
 	./tests/test-asan
+	$(CC) $(CFLAGS) $(ASANFLAGS) -o tests/test-oom-asan tests/test_oom.c
+	./tests/test-oom-asan
 
 bench: bench/bench.c swtab.h
 	$(CC) $(CFLAGS) -o bench/bench bench/bench.c
@@ -23,5 +27,5 @@ coverage: tests/test.c swtab.h
 	@echo "Coverage report: swtab.h.gcov"
 
 clean:
-	rm -f tests/test tests/test-asan tests/test-cov bench/bench
+	rm -f tests/test tests/test-asan tests/test-oom tests/test-oom-asan tests/test-cov bench/bench
 	rm -f tests/*.gcno tests/*.gcda *.gcov

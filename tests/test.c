@@ -75,6 +75,18 @@ colliding_hash(const void *entry)
     return 42;
 }
 
+struct keyed_entry {
+    int key;
+};
+
+static bool
+keyed_entry_eq(const void *entry, const void *key)
+{
+    const struct keyed_entry *e = entry;
+    const int *k = key;
+    return e->key == *k;
+}
+
 static void
 test_duplicate_hashes(void)
 {
@@ -103,6 +115,57 @@ test_duplicate_hashes(void)
 
     assert(swtab_find_next(&st, hash, c) == NULL ||
            swtab_find_next(&st, hash, c) != NULL);
+
+    swtab_destroy(&st);
+}
+
+static void
+test_find_key_resolves_hash_collision(void)
+{
+    swtab st;
+    swtab_init(&st, colliding_hash);
+
+    struct keyed_entry a = { .key = 1 };
+    struct keyed_entry b = { .key = 2 };
+    struct keyed_entry c = { .key = 3 };
+    swtab_hash_t hash = 42;
+
+    swtab_insert(&st, &a, hash);
+    swtab_insert(&st, &b, hash);
+    swtab_insert(&st, &c, hash);
+
+    int key = 2;
+    assert(swtab_find_key(&st, hash, &key, keyed_entry_eq) == &b);
+
+    key = 99;
+    assert(swtab_find_key(&st, hash, &key, keyed_entry_eq) == NULL);
+
+    swtab_destroy(&st);
+}
+
+static void
+test_find_key_next(void)
+{
+    swtab st;
+    swtab_init(&st, colliding_hash);
+
+    struct keyed_entry a = { .key = 7 };
+    struct keyed_entry b = { .key = 8 };
+    struct keyed_entry c = { .key = 7 };
+    swtab_hash_t hash = 42;
+
+    swtab_insert(&st, &a, hash);
+    swtab_insert(&st, &b, hash);
+    swtab_insert(&st, &c, hash);
+
+    int key = 7;
+    void *first = swtab_find_key(&st, hash, &key, keyed_entry_eq);
+    void *second = swtab_find_key_next(&st, hash, &key, keyed_entry_eq, first);
+    void *third = swtab_find_key_next(&st, hash, &key, keyed_entry_eq, second);
+
+    assert((first == &a && second == &c) ||
+           (first == &c && second == &a));
+    assert(third == NULL);
 
     swtab_destroy(&st);
 }
@@ -510,6 +573,8 @@ main(void)
     RUN_TEST(test_insert_find);
     RUN_TEST(test_insert_multiple);
     RUN_TEST(test_duplicate_hashes);
+    RUN_TEST(test_find_key_resolves_hash_collision);
+    RUN_TEST(test_find_key_next);
     RUN_TEST(test_remove);
     RUN_TEST(test_clear);
     RUN_TEST(test_reserve);

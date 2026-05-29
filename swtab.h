@@ -57,6 +57,38 @@
 #define SWTAB_LOAD_FACTOR_DEN 8
 #endif
 
+#if SWTAB_LOAD_FACTOR_NUM < 1
+#error "SWTAB_LOAD_FACTOR_NUM must be at least 1"
+#endif
+#if SWTAB_LOAD_FACTOR_DEN < 1
+#error "SWTAB_LOAD_FACTOR_DEN must be at least 1"
+#endif
+#if SWTAB_LOAD_FACTOR_NUM > SWTAB_LOAD_FACTOR_DEN
+#error "SWTAB_LOAD_FACTOR_NUM must be <= SWTAB_LOAD_FACTOR_DEN"
+#endif
+
+/* SWTAB_MALLOC / SWTAB_FREE - Allocation hooks.
+ *
+ * Defaults to malloc/free. Define both macros before including this
+ * header to override.
+ */
+#ifndef SWTAB_MALLOC
+#define SWTAB_MALLOC malloc
+#endif
+#ifndef SWTAB_FREE
+#define SWTAB_FREE free
+#endif
+
+/* SWTAB_OOM - Out-of-memory hook.
+ *
+ * Called when allocation fails or size arithmetic overflows. Defaults
+ * to abort(). If overridden, it should not return normally; swtab will
+ * abort if it does.
+ */
+#ifndef SWTAB_OOM
+#define SWTAB_OOM() abort()
+#endif
+
 /* swtab_hash_t - Hash value type (size_t).
  *
  * swtab_hash_fn - Hash function signature.
@@ -71,6 +103,19 @@
  */
 typedef size_t swtab_hash_t;
 typedef swtab_hash_t (*swtab_hash_fn)(const void *entry);
+
+/* swtab_key_eq_fn - Key equality function signature.
+ *
+ * Compares a table entry with a lookup key. Return true when the entry
+ * matches the key. Used by swtab_find_key() to resolve hash collisions.
+ *
+ *     bool my_eq(const void *entry, const void *key) {
+ *         const struct my_obj *obj = entry;
+ *         const char *name = key;
+ *         return strcmp(obj->name, name) == 0;
+ *     }
+ */
+typedef bool (*swtab_key_eq_fn)(const void *entry, const void *key);
 
 /* swtab - A swiss table hash map.
  *
@@ -164,9 +209,11 @@ swtab_reserve(swtab *st, size_t count);
 
 /* swtab_insert - Insert an entry into the table.
  *
- * The caller must provide a pre-computed hash. The table does not check
- * for duplicates; inserting the same entry twice is allowed and both
- * copies will be stored. The entry pointer must remain valid for the
+ * The caller must provide a pre-computed hash. Each entry pointer may
+ * have at most one membership in a table; inserting the same entry
+ * pointer again while it is already present is unsupported. Distinct
+ * entries with the same hash may coexist and can be visited with
+ * swtab_find_next(). The entry pointer must remain valid for the
  * lifetime of its membership in the table.
  *
  *     struct my_obj *obj = make_obj("foo");
@@ -189,8 +236,10 @@ swtab_remove(swtab *st, const void *entry, swtab_hash_t hash);
 
 /* swtab_find - Look up an entry by hash.
  *
- * Returns the first entry whose hash matches, or NULL if none. When
- * multiple entries share a hash, use swtab_find_next() to iterate
+ * Returns the first entry whose hash matches, or NULL if none. This is
+ * a hash-only lookup: callers that need key equality must either check
+ * candidate entries with swtab_find_next() or use swtab_find_key().
+ * When multiple entries share a hash, use swtab_find_next() to iterate
  * through them.
  *
  *     void *obj = swtab_find(&st, hash);
@@ -201,11 +250,48 @@ swtab_remove(swtab *st, const void *entry, swtab_hash_t hash);
 static inline void *
 swtab_find(const swtab *st, swtab_hash_t hash);
 
+/* swtab_find_key - Look up an entry by hash and key equality.
+ *
+ * Returns the first entry whose hash matches and for which eq_fn(entry,
+ * key) returns true, or NULL if none. Use swtab_find_key_next() to
+ * continue through additional key-equal entries. This is the key-aware
+ * version of swtab_find(); use swtab_find() when hash equality alone is
+ * enough or when the caller wants to iterate all same-hash candidates
+ * manually.
+ *
+ *     const char *name = "foo";
+ *     swtab_hash_t hash = hash_name(name);
+ *     struct my_obj *obj = swtab_find_key(&st, hash, name, my_eq);
+ */
+static inline void *
+swtab_find_key(const swtab *st, swtab_hash_t hash, const void *key,
+               swtab_key_eq_fn eq_fn);
+
+/* swtab_find_key_next - Continue a key-aware lookup.
+ *
+ * Returns the next entry after 'prev' whose hash matches and for which
+ * eq_fn(entry, key) returns true, or NULL if there are no more. 'prev'
+ * must be a pointer previously returned by swtab_find_key() or
+ * swtab_find_key_next() for the same hash and key. This is the
+ * key-aware counterpart to swtab_find_next().
+ *
+ *     swtab_hash_t h = hash_name(name);
+ *     for (void *e = swtab_find_key(&st, h, name, my_eq);
+ *          e;
+ *          e = swtab_find_key_next(&st, h, name, my_eq, e)) {
+ *         process(e);
+ *     }
+ */
+static inline void *
+swtab_find_key_next(const swtab *st, swtab_hash_t hash, const void *key,
+                    swtab_key_eq_fn eq_fn, const void *prev);
+
 /* swtab_find_next - Continue a lookup after swtab_find().
  *
  * Returns the next entry with the same hash after 'prev', or NULL if
  * there are no more. 'prev' must be a pointer previously returned by
- * swtab_find() or swtab_find_next() for the same hash.
+ * swtab_find() or swtab_find_next() for the same hash. For key-aware
+ * lookup, prefer swtab_find_key() and swtab_find_key_next().
  *
  *     swtab_hash_t h = my_hash(key);
  *     for (void *e = swtab_find(&st, h); e; e = swtab_find_next(&st, h, e)) {
@@ -322,6 +408,48 @@ swtab__group_has_empty(uint64_t ctrl)
     return (ctrl & ~(ctrl << 1)) & SWTAB__HIGH_BITS;
 }
 
+static inline void
+swtab__oom(void)
+{
+    SWTAB_OOM();
+    abort();
+}
+
+static inline size_t
+swtab__checked_add(size_t a, size_t b)
+{
+    if (a > (size_t)-1 - b) {
+        swtab__oom();
+    }
+    return a + b;
+}
+
+static inline size_t
+swtab__checked_mul(size_t a, size_t b)
+{
+    if (a != 0 && b > (size_t)-1 / a) {
+        swtab__oom();
+    }
+    return a * b;
+}
+
+static inline size_t
+swtab__capacity_from_groups(size_t groups)
+{
+    return swtab__checked_mul(groups, 8);
+}
+
+static inline size_t
+swtab__growth_left_for_cap(size_t cap)
+{
+    size_t q = cap / SWTAB_LOAD_FACTOR_DEN;
+    size_t r = cap % SWTAB_LOAD_FACTOR_DEN;
+    size_t whole = swtab__checked_mul(q, SWTAB_LOAD_FACTOR_NUM);
+    size_t rem = swtab__checked_mul(r, SWTAB_LOAD_FACTOR_NUM) /
+                 SWTAB_LOAD_FACTOR_DEN;
+    return swtab__checked_add(whole, rem);
+}
+
 #define SWTAB__FOR_EACH_GROUP(st, hash, index, ctrl) \
     for (uint64_t ctrl = 0, index##_init_ = 1; index##_init_; index##_init_ = 0) \
     for (size_t index = swtab__group_index(st, hash), index##_probe_ = 0; \
@@ -332,7 +460,12 @@ static inline void
 swtab__alloc(swtab *st, size_t cap)
 {
     size_t slots_off = cap;
-    char *mem = malloc(slots_off + cap * sizeof(void *));
+    size_t slots_bytes = swtab__checked_mul(cap, sizeof(void *));
+    size_t alloc_size = swtab__checked_add(slots_off, slots_bytes);
+    char *mem = SWTAB_MALLOC(alloc_size);
+    if (!mem) {
+        swtab__oom();
+    }
     st->ctrl = (int8_t *)mem;
     memset(st->ctrl, SWTAB__EMPTY, cap);
     st->slots = (void **)(mem + slots_off);
@@ -341,17 +474,18 @@ swtab__alloc(swtab *st, size_t cap)
 static inline void
 swtab__grow_to(swtab *st, size_t new_groups)
 {
-    size_t old_cap = (st->group_mask + 1) * 8;
+    size_t old_groups = swtab__checked_add(st->group_mask, 1);
+    size_t old_cap = swtab__capacity_from_groups(old_groups);
     int8_t *old_ctrl = st->ctrl;
     void **old_slots = st->slots;
     bool was_empty = (st->ctrl == swtab__empty_ctrl);
 
-    size_t new_cap = new_groups * 8;
+    size_t new_cap = swtab__capacity_from_groups(new_groups);
 
     swtab__alloc(st, new_cap);
     st->group_mask = new_groups - 1;
     st->size = 0;
-    st->growth_left = new_cap * SWTAB_LOAD_FACTOR_NUM / SWTAB_LOAD_FACTOR_DEN;
+    st->growth_left = swtab__growth_left_for_cap(new_cap);
 
     if (!was_empty) {
         size_t old_groups_n = old_cap / 8;
@@ -364,7 +498,7 @@ swtab__grow_to(swtab *st, size_t new_groups)
                 swtab_insert(st, old_slots[pos], st->hash_fn(old_slots[pos]));
             }
         }
-        free(old_ctrl);
+        SWTAB_FREE(old_ctrl);
     }
 }
 
@@ -372,7 +506,13 @@ static inline void
 swtab__grow(swtab *st)
 {
     bool was_empty = (st->ctrl == swtab__empty_ctrl);
-    size_t new_groups = was_empty ? 1 : (st->group_mask + 1) * 2;
+    size_t new_groups;
+    if (was_empty) {
+        new_groups = 1;
+    } else {
+        size_t old_groups = swtab__checked_add(st->group_mask, 1);
+        new_groups = swtab__checked_mul(old_groups, 2);
+    }
     swtab__grow_to(st, new_groups);
 }
 
@@ -395,7 +535,7 @@ static inline void
 swtab_destroy(swtab *st)
 {
     if (st->ctrl != swtab__empty_ctrl) {
-        free(st->ctrl);
+        SWTAB_FREE(st->ctrl);
     }
     swtab_hash_fn fn = st->hash_fn;
     swtab_init(st, fn);
@@ -417,10 +557,11 @@ static inline void
 swtab_clear(swtab *st)
 {
     if (st->ctrl != swtab__empty_ctrl) {
-        size_t cap = (st->group_mask + 1) * 8;
+        size_t cap = swtab__capacity_from_groups(
+            swtab__checked_add(st->group_mask, 1));
         memset(st->ctrl, SWTAB__EMPTY, cap);
         st->size = 0;
-        st->growth_left = cap * SWTAB_LOAD_FACTOR_NUM / SWTAB_LOAD_FACTOR_DEN;
+        st->growth_left = swtab__growth_left_for_cap(cap);
     }
 }
 
@@ -432,9 +573,16 @@ swtab_reserve(swtab *st, size_t count)
     }
 
     bool was_empty = (st->ctrl == swtab__empty_ctrl);
-    size_t new_groups = was_empty ? 1 : (st->group_mask + 1) * 2;
-    while (new_groups * 8 * SWTAB_LOAD_FACTOR_NUM / SWTAB_LOAD_FACTOR_DEN < count) {
-        new_groups *= 2;
+    size_t new_groups;
+    if (was_empty) {
+        new_groups = 1;
+    } else {
+        new_groups = swtab__checked_mul(
+            swtab__checked_add(st->group_mask, 1), 2);
+    }
+    while (swtab__growth_left_for_cap(
+               swtab__capacity_from_groups(new_groups)) < count) {
+        new_groups = swtab__checked_mul(new_groups, 2);
     }
     swtab__grow_to(st, new_groups);
 }
@@ -497,6 +645,57 @@ swtab_find(const swtab *st, swtab_hash_t hash)
         while (match) {
             size_t pos = swtab__slot_pos(index, swtab__ctrl_next_match(&match));
             if (st->hash_fn(st->slots[pos]) == hash) {
+                return st->slots[pos];
+            }
+        }
+
+        if (swtab__group_has_empty(ctrl)) {
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+static inline void *
+swtab_find_key(const swtab *st, swtab_hash_t hash, const void *key,
+               swtab_key_eq_fn eq_fn)
+{
+    uint8_t h2 = swtab__h2(hash);
+    SWTAB__FOR_EACH_GROUP(st, hash, index, ctrl) {
+        uint64_t match = swtab__ctrl_match(ctrl, h2);
+        while (match) {
+            size_t pos = swtab__slot_pos(index, swtab__ctrl_next_match(&match));
+            if (st->hash_fn(st->slots[pos]) == hash &&
+                eq_fn(st->slots[pos], key)) {
+                return st->slots[pos];
+            }
+        }
+
+        if (swtab__group_has_empty(ctrl)) {
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+static inline void *
+swtab_find_key_next(const swtab *st, swtab_hash_t hash, const void *key,
+                    swtab_key_eq_fn eq_fn, const void *prev)
+{
+    uint8_t h2 = swtab__h2(hash);
+    bool found_prev = false;
+    SWTAB__FOR_EACH_GROUP(st, hash, index, ctrl) {
+        uint64_t match = swtab__ctrl_match(ctrl, h2);
+        while (match) {
+            size_t pos = swtab__slot_pos(index, swtab__ctrl_next_match(&match));
+            if (!found_prev) {
+                if (st->slots[pos] == prev) {
+                    found_prev = true;
+                }
+                continue;
+            }
+            if (st->hash_fn(st->slots[pos]) == hash &&
+                eq_fn(st->slots[pos], key)) {
                 return st->slots[pos];
             }
         }

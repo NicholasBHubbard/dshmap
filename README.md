@@ -7,7 +7,7 @@ swtab is a header-only C99 swiss table hash map.
 - **Fast**: SWAR group scanning checks 8 slots per step; benchmarks show 3-5x faster lookups than chained hash maps at scale ([see benchmarks](#benchmarks))
 - **Cache-friendly**: flat, contiguous layout minimizes pointer chasing and cache misses
 - **Header-only**: single file, no build system integration, no dependencies beyond the C standard library
-- **Generic**: stores `void *` pointers; works with any data type
+- **Generic**: stores caller-owned `void *` entries; each entry pointer may be present at most once
 - **Small**: ~9 bytes/entry overhead at typical load factors
 
 ## Usage
@@ -59,11 +59,23 @@ Full documentation is in `swtab.h`.
 | `swtab_is_empty` | Check if empty |
 | `swtab_clear` | Remove all entries, keep capacity |
 | `swtab_reserve` | Pre-allocate capacity |
-| `swtab_insert` | Insert an entry |
+| `swtab_insert` | Insert an entry; inserting the same entry pointer twice without removing it first is unsupported |
 | `swtab_remove` | Remove an entry by pointer |
-| `swtab_find` | Look up by hash |
-| `swtab_find_next` | Continue a lookup (duplicates) |
+| `swtab_find` | Look up by hash; use `swtab_find_key` when key equality matters |
+| `swtab_find_key` | Look up by hash and key equality; key-aware form of `swtab_find` |
+| `swtab_find_key_next` | Continue a key-aware lookup through duplicate logical keys |
+| `swtab_find_next` | Continue a lookup through distinct entries with the same hash |
 | `SWTAB_FOR_EACH` | Iterate all entries |
+
+## Allocation Failure
+
+Allocation failure is fatal by default. If allocation fails, or if size
+arithmetic overflows while growing/reserving, `swtab` calls `SWTAB_OOM()`.
+The default hook calls `abort()`.
+
+Define `SWTAB_OOM`, `SWTAB_MALLOC`, and `SWTAB_FREE` before including
+`swtab.h` to customize allocation behavior. `SWTAB_OOM()` should not return
+normally; if it does, `swtab` aborts.
 
 ## Building
 
