@@ -1,6 +1,6 @@
 # swtab
 
-swtab is a header-only C99 Swiss table hash map.
+swtab is a header-only C99 swiss table hash map.
 
 ## Features
 
