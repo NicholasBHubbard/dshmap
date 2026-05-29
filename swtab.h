@@ -95,9 +95,6 @@
 #define SWTAB_OOM() abort()
 #endif
 
-#define SWTAB__LIKELY(x)   __builtin_expect(!!(x), 1)
-#define SWTAB__UNLIKELY(x) __builtin_expect(!!(x), 0)
-
 /* swtab_hash_t - Hash value type (size_t).
  *
  * swtab_hash_fn - Hash function signature.
@@ -336,6 +333,9 @@ swtab_find_next(const swtab *st, swtab_hash_t hash, const void *prev);
 /* ===========================================================================
  *                                INTERNAL
  * =========================================================================== */
+
+#define SWTAB__LIKELY(x)   __builtin_expect(!!(x), 1)
+#define SWTAB__UNLIKELY(x) __builtin_expect(!!(x), 0)
 
 enum {
     SWTAB__EMPTY   = (int8_t)0x80,
