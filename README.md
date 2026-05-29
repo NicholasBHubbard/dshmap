@@ -49,7 +49,7 @@ int main(void) {
 
 ## API
 
-Full documentation is in `swtab.h` above each function prototype.
+Full documentation is in `swtab.h`.
 
 | Function | Description |
 |---|---|
