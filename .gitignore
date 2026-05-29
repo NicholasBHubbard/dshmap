@@ -1,0 +1,7 @@
+tests/test
+tests/test-asan
+tests/test-cov
+tests/*.gcno
+tests/*.gcda
+bench/bench
+*.gcov

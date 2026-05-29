@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: make test CC=${{ matrix.compiler }}
+      - name: Run tests (ASan + UBSan)
+        run: make test-asan CC=${{ matrix.compiler }}
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run coverage
+        run: make coverage
+      - name: Check coverage threshold
+        run: |
+          pct=$(gcov -r tests/test-cov-test.gcno 2>/dev/null | grep -A1 "File 'swtab.h'" | grep Lines | grep -oP '[\d.]+%' | tr -d '%')
+          echo "swtab.h coverage: ${pct}%"
+          if [ "$(echo "$pct < 95" | bc)" -eq 1 ]; then
+            echo "FAIL: coverage ${pct}% is below 95% threshold"
+            exit 1
+          fi
