@@ -4,8 +4,8 @@ swtab is a header-only C99 swiss table hash map.
 
 ## Features
 
-- **Fast**: SWAR group scanning checks 8 slots per step; benchmarks show 3-5x faster lookups than chained hash maps at scale ([see benchmarks](#benchmarks))
-- **Cache-friendly**: flat, contiguous layout minimizes pointer chasing and cache misses
+- **Scale-oriented**: flat Swiss-table layout reduces pointer chasing and cache misses; the largest wins show up on large tables, especially misses, removes, iteration, and memory use ([see benchmarks](#benchmarks))
+- **Cache-friendly**: contiguous control bytes and slots improve locality compared with pointer-heavy tables
 - **Header-only**: single file, no build system integration, no dependencies beyond the C standard library
 - **Generic**: stores caller-owned non-`NULL` `void *` entries; each entry pointer may be present at most once
 - **Small**: ~9 bytes/entry overhead at typical load factors
@@ -102,6 +102,17 @@ Run the comparative benchmark (swtab vs chained hash map):
 make bench
 ```
 
+## Performance Profile
+
+`swtab` is designed for large, cache-sensitive tables. Its flat layout tends
+to pay off once pointer chasing and cache misses dominate.
+
+For small tables, it is not guaranteed to beat simpler hash maps. Function
+pointer hashing, control-byte probing, and Swiss-table bookkeeping can cost
+more than a simple chained table or linear structure at small sizes.
+
+Benchmark with your workload if small-table latency matters.
+
 ## Benchmarks
 
 All numbers below are from a single machine and will vary by hardware.
@@ -114,7 +125,7 @@ with linked lists). Adding your own implementation
 is straightforward: write an `impl_foo.h` adapter with the `bench_impl`
 vtable and add it to the `impls[]` array in `bench/bench.c`.
 
-### L2-resident (1024 entries)
+### Small/L2-Resident: Mixed Results
 
 | Operation | swtab (ns/op) | chained (ns/op) |
 |---|---|---|
@@ -124,7 +135,7 @@ vtable and add it to the `impls[]` array in `bench/bench.c`.
 | remove | 3.6 | 6.5 |
 | iterate | 2.3 | 1.9 |
 
-### Beyond L3 (1M entries)
+### Large/Beyond L3: Strong Wins
 
 | Operation | swtab (ns/op) | chained (ns/op) |
 |---|---|---|
