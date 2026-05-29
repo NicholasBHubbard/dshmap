@@ -143,7 +143,8 @@ vtable and add it to the `impls[]` array in `bench/bench.c`.
 ## Requirements
 
 - C99 compiler (GCC or Clang)
-- 64-bit platform (SWAR operations assume 64-bit `uint64_t`)
+- Little-endian 64-bit platform (SWAR operations assume 64-bit `uint64_t`
+  and little-endian control-byte decoding)
 
 The benchmark (`make bench`) uses Linux `perf_event_open` for hardware
 counters but falls back to wall-clock timing on other platforms.

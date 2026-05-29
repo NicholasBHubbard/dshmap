@@ -31,6 +31,12 @@
 #error "requires GCC or Clang"
 #endif
 
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
+#if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+#error "requires little-endian byte order"
+#endif
+#endif
+
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
