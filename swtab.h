@@ -89,6 +89,9 @@
 #define SWTAB_OOM() abort()
 #endif
 
+#define SWTAB__LIKELY(x)   __builtin_expect(!!(x), 1)
+#define SWTAB__UNLIKELY(x) __builtin_expect(!!(x), 0)
+
 /* swtab_hash_t - Hash value type (size_t).
  *
  * swtab_hash_fn - Hash function signature.
@@ -119,9 +122,10 @@ typedef bool (*swtab_key_eq_fn)(const void *entry, const void *key);
 
 /* swtab - A swiss table hash map.
  *
- * Stores void pointers to caller-owned entries. Entries are located by
- * hash; the caller provides a hash function that can recompute the hash
- * from an entry pointer.
+ * Stores non-NULL void pointers to caller-owned entries. Entries are
+ * located by hash; the caller provides a hash function that can
+ * recompute the hash from an entry pointer. NULL entries are not
+ * supported because NULL is used as the lookup miss result.
  *
  * Must be initialized with swtab_init() before use and cleaned up with
  * swtab_destroy(). Stack allocation is typical:
@@ -209,12 +213,12 @@ swtab_reserve(swtab *st, size_t count);
 
 /* swtab_insert - Insert an entry into the table.
  *
- * The caller must provide a pre-computed hash. Each entry pointer may
- * have at most one membership in a table; inserting the same entry
- * pointer again while it is already present is unsupported. Distinct
- * entries with the same hash may coexist and can be visited with
- * swtab_find_next(). The entry pointer must remain valid for the
- * lifetime of its membership in the table.
+ * The caller must provide a pre-computed hash. The entry pointer must
+ * be non-NULL. Each entry pointer may have at most one membership in a
+ * table; inserting the same entry pointer again while it is already
+ * present is unsupported. Distinct entries with the same hash may
+ * coexist and can be visited with swtab_find_next(). The entry pointer
+ * must remain valid for the lifetime of its membership in the table.
  *
  *     struct my_obj *obj = make_obj("foo");
  *     swtab_insert(&st, obj, my_hash(obj));
@@ -303,9 +307,10 @@ swtab_find_next(const swtab *st, swtab_hash_t hash, const void *prev);
 
 /* SWTAB_FOR_EACH - Iterate over all entries in the table.
  *
- * 'var' is declared as void * in the loop scope. Iteration order is
- * arbitrary and not related to insertion order. Do not insert or remove
- * entries during iteration.
+ * 'var' is declared as void * in the loop scope. Entries must be
+ * non-NULL; NULL is used internally as the loop sentinel. Iteration
+ * order is arbitrary and not related to insertion order. Do not insert
+ * or remove entries during iteration.
  *
  * Skips empty groups in bulk using SWAR, so iteration cost scales with
  * the number of entries, not the table capacity.
@@ -390,6 +395,14 @@ static inline uint64_t
 swtab__ctrl_match(uint64_t ctrl, uint8_t h2)
 {
     uint64_t match = ctrl ^ (SWTAB__BROADCAST_BYTE * h2);
+    match = (match - SWTAB__BROADCAST_BYTE) & ~match & SWTAB__HIGH_BITS;
+    return match;
+}
+
+static inline uint64_t
+swtab__ctrl_deleted(uint64_t ctrl)
+{
+    uint64_t match = ctrl ^ (SWTAB__BROADCAST_BYTE * (uint8_t)SWTAB__DELETED);
     match = (match - SWTAB__BROADCAST_BYTE) & ~match & SWTAB__HIGH_BITS;
     return match;
 }
@@ -590,20 +603,35 @@ swtab_reserve(swtab *st, size_t count)
 static inline void
 swtab_insert(swtab *st, void *entry, swtab_hash_t hash)
 {
-    if (st->growth_left == 0) {
+    uint8_t h2 = swtab__h2(hash);
+
+    if (SWTAB__UNLIKELY(st->growth_left == 0)) {
+        SWTAB__FOR_EACH_GROUP(st, hash, index, ctrl) {
+            uint64_t deleted = swtab__ctrl_deleted(ctrl);
+            if (deleted) {
+                size_t pos = swtab__slot_pos(index, swtab__match_slot(deleted));
+                st->ctrl[pos] = (int8_t)h2;
+                st->slots[pos] = entry;
+                st->size++;
+                return;
+            }
+
+            if (swtab__group_has_empty(ctrl)) {
+                break;
+            }
+        }
         swtab__grow(st);
     }
 
-    uint8_t h2 = swtab__h2(hash);
     SWTAB__FOR_EACH_GROUP(st, hash, index, ctrl) {
         uint64_t available = swtab__ctrl_available(ctrl);
-        if (available) {
+        if (SWTAB__LIKELY(available)) {
             size_t pos = swtab__slot_pos(index, swtab__match_slot(available));
             bool was_empty = (st->ctrl[pos] == SWTAB__EMPTY);
             st->ctrl[pos] = (int8_t)h2;
             st->slots[pos] = entry;
             st->size++;
-            if (was_empty) {
+            if (SWTAB__LIKELY(was_empty)) {
                 st->growth_left--;
             }
             return;
@@ -624,8 +652,8 @@ swtab_remove(swtab *st, const void *entry, swtab_hash_t hash)
                 st->ctrl[pos] = empty ? SWTAB__EMPTY : SWTAB__DELETED;
                 st->slots[pos] = NULL;
                 st->size--;
-                if (!empty && st->growth_left > 0) {
-                    st->growth_left--;
+                if (empty) {
+                    st->growth_left++;
                 }
                 return;
             }

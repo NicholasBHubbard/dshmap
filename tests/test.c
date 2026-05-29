@@ -521,6 +521,66 @@ test_load_factor_boundary(void)
 }
 
 static void
+test_remove_empty_slot_restores_growth(void)
+{
+    swtab st;
+    swtab_init(&st, dummy_hash);
+
+    swtab_insert(&st, (void *)1, dummy_hash((void *)1));
+    assert(st.group_mask == 0);
+    size_t threshold = ((st.group_mask + 1) * 8) *
+                       SWTAB_LOAD_FACTOR_NUM / SWTAB_LOAD_FACTOR_DEN;
+
+    for (size_t i = 2; i <= threshold; i++) {
+        swtab_insert(&st, (void *)i, dummy_hash((void *)i));
+    }
+    assert(st.group_mask == 0);
+    assert(st.growth_left == 0);
+
+    swtab_remove(&st, (void *)threshold, dummy_hash((void *)threshold));
+    assert(st.growth_left == 1);
+
+    swtab_insert(&st, (void *)100, dummy_hash((void *)100));
+    assert(st.group_mask == 0);
+    assert(st.growth_left == 0);
+    assert(swtab_size(&st) == threshold);
+    assert(swtab_find(&st, dummy_hash((void *)100)) == (void *)100);
+
+    swtab_destroy(&st);
+}
+
+static void
+test_reuse_tombstone_at_boundary(void)
+{
+    swtab st;
+    swtab_init(&st, dummy_hash);
+
+    swtab_reserve(&st, 14);
+    assert(st.group_mask == 1);
+
+    for (size_t i = 1; i <= 8; i++) {
+        swtab_insert(&st, (void *)i, dummy_hash((void *)i));
+    }
+    for (size_t i = 129; i <= 134; i++) {
+        swtab_insert(&st, (void *)i, dummy_hash((void *)i));
+    }
+    assert(swtab_size(&st) == 14);
+    assert(st.growth_left == 0);
+
+    swtab_remove(&st, (void *)1, dummy_hash((void *)1));
+    assert(st.group_mask == 1);
+    assert(st.growth_left == 0);
+
+    swtab_insert(&st, (void *)9, dummy_hash((void *)9));
+    assert(st.group_mask == 1);
+    assert(st.growth_left == 0);
+    assert(swtab_size(&st) == 14);
+    assert(swtab_find(&st, dummy_hash((void *)9)) == (void *)9);
+
+    swtab_destroy(&st);
+}
+
+static void
 test_find_next_no_duplicates(void)
 {
     swtab st;
@@ -591,6 +651,8 @@ main(void)
     RUN_TEST(test_reinsert_same);
     RUN_TEST(test_churn);
     RUN_TEST(test_load_factor_boundary);
+    RUN_TEST(test_remove_empty_slot_restores_growth);
+    RUN_TEST(test_reuse_tombstone_at_boundary);
     RUN_TEST(test_find_next_no_duplicates);
     RUN_TEST(test_mixed_operations);
 
