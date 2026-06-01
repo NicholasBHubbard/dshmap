@@ -1,6 +1,6 @@
 # dshmap
 
-dshmap is a header-only C99 dense-to-swiss hash map.
+dshmap is a header only C99 Swiss-style hash map with a dense small-table fast path.
 
 ## Features
 
