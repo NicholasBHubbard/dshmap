@@ -164,31 +164,59 @@ with linked lists). Adding your own implementation
 is straightforward: write an `impl_foo.h` adapter with the `bench_impl`
 vtable and add it to the `impls[]` array in `bench/bench.c`.
 
-### Small/L2-Resident: Mixed Results
+The table below uses the `ptr` workload, with hardware counters disabled.
+Values are median wall-clock timings from 7 runs. Ratio is
+`dshmap / chained`, so lower is better.
 
-| Operation | dshmap (ns/op) | chained (ns/op) |
-|---|---|---|
-| insert_seq | 11.2 | 19.4 |
-| find_hit | 3.8 | 2.0 |
-| find_miss | 3.0 | 2.9 |
-| remove | 3.6 | 6.5 |
-| iterate | 2.3 | 1.9 |
+```
+make bench BENCH_ARGS="--csv --sizes 64,2048,4096,65536,1048576 --keys ptr --ops insert_seq,find_hit,find_miss,remove,iterate,mixed --min-ops 500000 --no-perf"
+```
 
-### Large/Beyond L3: Strong Wins
+`mixed` starts from a half-full table and runs a randomized workload of about
+70% find, 20% insert, and 10% remove.
 
-| Operation | dshmap (ns/op) | chained (ns/op) |
-|---|---|---|
-| insert_seq | 28.9 | 46.0 |
-| find_hit | 24.0 | 45.8 |
-| find_miss | 7.2 | 55.5 |
-| remove | 22.3 | 96.4 |
-| iterate | 2.8 | 19.7 |
+| Size | Operation | dshmap (ns/op) | chained (ns/op) | Ratio | Winner |
+|---:|---|---:|---:|---:|---|
+| 64 | `insert_seq` | 8.0 | 7.4 | 1.08 | chained |
+| 64 | `find_hit` | 3.0 | 2.1 | 1.45 | chained |
+| 64 | `find_miss` | 2.9 | 2.8 | 1.03 | chained |
+| 64 | `remove` | 4.9 | 5.4 | 0.91 | dshmap |
+| 64 | `iterate` | 1.4 | 1.6 | 0.88 | dshmap |
+| 64 | `mixed` | 3.2 | 3.4 | 0.94 | dshmap |
+| 2048 | `insert_seq` | 9.3 | 20.5 | 0.46 | dshmap |
+| 2048 | `find_hit` | 3.2 | 2.2 | 1.45 | chained |
+| 2048 | `find_miss` | 2.8 | 3.2 | 0.88 | dshmap |
+| 2048 | `remove` | 5.1 | 7.9 | 0.64 | dshmap |
+| 2048 | `iterate` | 2.5 | 1.8 | 1.38 | chained |
+| 2048 | `mixed` | 3.2 | 5.4 | 0.60 | dshmap |
+| 4096 | `insert_seq` | 15.1 | 18.2 | 0.83 | dshmap |
+| 4096 | `find_hit` | 3.9 | 6.9 | 0.57 | dshmap |
+| 4096 | `find_miss` | 3.7 | 8.4 | 0.44 | dshmap |
+| 4096 | `remove` | 4.6 | 10.7 | 0.43 | dshmap |
+| 4096 | `iterate` | 2.5 | 2.7 | 0.93 | dshmap |
+| 4096 | `mixed` | 4.7 | 9.8 | 0.48 | dshmap |
+| 65536 | `insert_seq` | 18.0 | 16.7 | 1.08 | chained |
+| 65536 | `find_hit` | 4.7 | 14.6 | 0.32 | dshmap |
+| 65536 | `find_miss` | 4.4 | 16.4 | 0.27 | dshmap |
+| 65536 | `remove` | 6.1 | 17.5 | 0.35 | dshmap |
+| 65536 | `iterate` | 2.6 | 7.4 | 0.35 | dshmap |
+| 65536 | `mixed` | 7.8 | 16.1 | 0.49 | dshmap |
+| 1048576 | `insert_seq` | 23.8 | 36.8 | 0.65 | dshmap |
+| 1048576 | `find_hit` | 25.4 | 41.9 | 0.61 | dshmap |
+| 1048576 | `find_miss` | 7.6 | 48.6 | 0.16 | dshmap |
+| 1048576 | `remove` | 26.2 | 92.3 | 0.28 | dshmap |
+| 1048576 | `iterate` | 2.8 | 20.0 | 0.14 | dshmap |
+| 1048576 | `mixed` | 36.5 | 57.8 | 0.63 | dshmap |
 
 ### Memory
 
-| | dshmap | chained |
-|---|---|---|
-| bytes/entry | 18.0 | 32.0 |
+| Size | dshmap bytes/entry | chained bytes/entry |
+|---:|---:|---:|
+| 64 | 34.0 | 32.0 |
+| 2048 | 34.0 | 32.0 |
+| 4096 | 18.0 | 32.0 |
+| 65536 | 18.0 | 32.0 |
+| 1048576 | 18.0 | 32.0 |
 
 ## Requirements
 
