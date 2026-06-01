@@ -41,6 +41,13 @@ enum output_mode {
     OUTPUT_CSV,
 };
 
+enum bench_key_mode {
+    BENCH_KEYS_PTR = 0,
+    BENCH_KEYS_STRING,
+    BENCH_KEYS_EXPENSIVE,
+    BENCH_KEYS_COUNT,
+};
+
 static const char *bench_op_names[BENCH_OP_COUNT] = {
     "insert_seq",
     "insert_rnd",
@@ -51,12 +58,19 @@ static const char *bench_op_names[BENCH_OP_COUNT] = {
     "mixed",
 };
 
+static const char *bench_key_mode_names[BENCH_KEYS_COUNT] = {
+    "ptr",
+    "string",
+    "expensive",
+};
+
 struct bench_options {
     size_t *sizes;
     size_t n_sizes;
     size_t sizes_cap;
     size_t min_total_ops;
     uint32_t op_mask;
+    enum bench_key_mode key_mode;
     enum output_mode mode;
     bool use_perf;
 };
@@ -84,25 +98,195 @@ rng_next(void)
     return x;
 }
 
-/* --- Shuffle --- */
+/* --- Key workloads --- */
+
+struct bench_entry {
+    size_t len;
+    char text[48];
+};
+
+struct bench_keys {
+    enum bench_key_mode mode;
+    bench_hash_fn hash_fn;
+    struct bench_entry *entries;
+    void **ptrs;
+    bench_hash_t *hashes;
+    void **ptrs_shuffled;
+    bench_hash_t *hashes_shuffled;
+    bench_hash_t *hashes_miss;
+};
+
+static void *
+xmalloc(size_t size)
+{
+    void *p = malloc(size ? size : 1);
+    if (!p) {
+        fprintf(stderr, "bench: out of memory\n");
+        exit(1);
+    }
+    return p;
+}
+
+static uint64_t
+mix64(uint64_t x)
+{
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
 
 static void
-shuffle_u64(uint64_t *arr, size_t n)
+bench_entry_init(struct bench_entry *entry, uint64_t value)
 {
+    int len;
+
+    len = snprintf(entry->text, sizeof(entry->text), "key-%016llx-%016llx",
+                   (unsigned long long)value,
+                   (unsigned long long)mix64(value));
+    if (len < 0 || (size_t)len >= sizeof(entry->text)) {
+        fprintf(stderr, "bench: generated key overflow\n");
+        exit(1);
+    }
+    entry->len = (size_t)len;
+}
+
+static bench_hash_t
+hash_bytes(const char *data, size_t len)
+{
+    uint64_t h = 1469598103934665603ULL;
+
+    for (size_t i = 0; i < len; i++) {
+        h ^= (unsigned char)data[i];
+        h *= 1099511628211ULL;
+    }
+    return (bench_hash_t)mix64(h ^ len);
+}
+
+static bench_hash_t
+bench_hash_ptr(const void *entry)
+{
+    return (bench_hash_t)(uintptr_t)entry;
+}
+
+static bench_hash_t
+bench_hash_string(const void *entry)
+{
+    const struct bench_entry *e = entry;
+    return hash_bytes(e->text, e->len);
+}
+
+static bench_hash_t
+bench_hash_expensive(const void *entry)
+{
+    const struct bench_entry *e = entry;
+    uint64_t h = hash_bytes(e->text, e->len);
+
+    for (uint64_t i = 0; i < 32; i++)
+        h = mix64(h + 0x9e3779b97f4a7c15ULL + i);
+    return (bench_hash_t)h;
+}
+
+static bench_hash_fn
+bench_hash_fn_for_mode(enum bench_key_mode mode)
+{
+    switch (mode) {
+    case BENCH_KEYS_PTR:
+        return bench_hash_ptr;
+    case BENCH_KEYS_STRING:
+        return bench_hash_string;
+    case BENCH_KEYS_EXPENSIVE:
+        return bench_hash_expensive;
+    case BENCH_KEYS_COUNT:
+        break;
+    }
+    abort();
+}
+
+static void
+bench_make_key(enum bench_key_mode mode, bench_hash_fn hash_fn,
+               uint64_t value, struct bench_entry *entry,
+               void **ptr, bench_hash_t *hash)
+{
+    if (mode == BENCH_KEYS_PTR) {
+        *ptr = (void *)(uintptr_t)value;
+        *hash = hash_fn(*ptr);
+        return;
+    }
+
+    bench_entry_init(entry, value);
+    *ptr = entry;
+    *hash = hash_fn(entry);
+}
+
+static bench_hash_t
+bench_make_miss_hash(enum bench_key_mode mode, bench_hash_fn hash_fn,
+                     uint64_t value)
+{
+    struct bench_entry entry;
+    void *ptr;
+    bench_hash_t hash;
+
+    bench_make_key(mode, hash_fn, value, &entry, &ptr, &hash);
+    return hash;
+}
+
+static void
+shuffle_pairs(void **ptrs, bench_hash_t *hashes, size_t n)
+{
+    if (n < 2)
+        return;
+
     for (size_t i = n - 1; i > 0; i--) {
         size_t j = rng_next() % (i + 1);
-        uint64_t tmp = arr[i];
-        arr[i] = arr[j];
-        arr[j] = tmp;
+        void *ptr_tmp = ptrs[i];
+        bench_hash_t hash_tmp = hashes[i];
+        ptrs[i] = ptrs[j];
+        hashes[i] = hashes[j];
+        ptrs[j] = ptr_tmp;
+        hashes[j] = hash_tmp;
     }
 }
 
-/* --- Hash function --- */
-
-static bench_hash_t
-bench_hash(const void *entry)
+static void
+bench_keys_init(struct bench_keys *keys, enum bench_key_mode mode, size_t n)
 {
-    return (bench_hash_t)(uintptr_t)entry;
+    keys->mode = mode;
+    keys->hash_fn = bench_hash_fn_for_mode(mode);
+    keys->entries = mode == BENCH_KEYS_PTR ? NULL :
+        xmalloc(n * sizeof(*keys->entries));
+    keys->ptrs = xmalloc(n * sizeof(*keys->ptrs));
+    keys->hashes = xmalloc(n * sizeof(*keys->hashes));
+    keys->ptrs_shuffled = xmalloc(n * sizeof(*keys->ptrs_shuffled));
+    keys->hashes_shuffled = xmalloc(n * sizeof(*keys->hashes_shuffled));
+    keys->hashes_miss = xmalloc(n * sizeof(*keys->hashes_miss));
+
+    for (size_t i = 0; i < n; i++) {
+        struct bench_entry *entry = keys->entries ? &keys->entries[i] : NULL;
+        bench_make_key(mode, keys->hash_fn, rng_next() | 1, entry,
+                       &keys->ptrs[i], &keys->hashes[i]);
+    }
+
+    memcpy(keys->ptrs_shuffled, keys->ptrs, n * sizeof(*keys->ptrs));
+    memcpy(keys->hashes_shuffled, keys->hashes, n * sizeof(*keys->hashes));
+    shuffle_pairs(keys->ptrs_shuffled, keys->hashes_shuffled, n);
+
+    for (size_t i = 0; i < n; i++)
+        keys->hashes_miss[i] = bench_make_miss_hash(mode, keys->hash_fn,
+                                                    rng_next() | 1);
+}
+
+static void
+bench_keys_destroy(struct bench_keys *keys)
+{
+    free(keys->entries);
+    free(keys->ptrs);
+    free(keys->hashes);
+    free(keys->ptrs_shuffled);
+    free(keys->hashes_shuffled);
+    free(keys->hashes_miss);
 }
 
 /* --- Timing --- */
@@ -310,10 +494,10 @@ calc_iters(size_t n)
 }
 
 static void *
-alloc_ctx(const bench_impl *impl)
+alloc_ctx(const bench_impl *impl, bench_hash_fn hash_fn)
 {
     void *ctx = calloc(1, impl->ctx_size);
-    impl->init(ctx, bench_hash);
+    impl->init(ctx, hash_fn);
     return ctx;
 }
 
@@ -326,12 +510,12 @@ free_ctx(const bench_impl *impl, void *ctx)
 
 static void
 populate(const bench_impl *impl, void *ctx,
-         const uint64_t *keys, size_t n)
+         void *const *entries, const bench_hash_t *hashes, size_t n)
 {
     if (impl->reserve)
         impl->reserve(ctx, n);
     for (size_t i = 0; i < n; i++)
-        impl->insert(ctx, (void *)(uintptr_t)keys[i], keys[i]);
+        impl->insert(ctx, entries[i], hashes[i]);
 }
 
 /* --- Iteration callback --- */
@@ -347,21 +531,22 @@ iter_nop(void *entry, void *arg)
 
 static struct bench_result
 bench_insert_seq(const bench_impl *impl, size_t n,
-                 const uint64_t *keys, struct perf_group *pg)
+                 bench_hash_fn hash_fn, void *const *entries,
+                 const bench_hash_t *hashes, struct perf_group *pg)
 {
     struct bench_result res = { .name = "insert_seq" };
     size_t iters = calc_iters(n);
 
-    void *ctx = alloc_ctx(impl);
+    void *ctx = alloc_ctx(impl, hash_fn);
     for (size_t i = 0; i < n; i++)
-        impl->insert(ctx, (void *)(uintptr_t)keys[i], keys[i]);
+        impl->insert(ctx, entries[i], hashes[i]);
     free_ctx(impl, ctx);
 
     uint64_t total_ns = 0;
     uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
 
     for (size_t iter = 0; iter < iters; iter++) {
-        ctx = alloc_ctx(impl);
+        ctx = alloc_ctx(impl, hash_fn);
 
         perf_group_reset(pg);
         perf_group_enable(pg);
@@ -369,7 +554,7 @@ bench_insert_seq(const bench_impl *impl, size_t n,
         COMPILER_BARRIER();
 
         for (size_t i = 0; i < n; i++)
-            impl->insert(ctx, (void *)(uintptr_t)keys[i], keys[i]);
+            impl->insert(ctx, entries[i], hashes[i]);
 
         COMPILER_BARRIER();
         uint64_t t1 = time_ns();
@@ -392,21 +577,22 @@ bench_insert_seq(const bench_impl *impl, size_t n,
 
 static struct bench_result
 bench_insert_rnd(const bench_impl *impl, size_t n,
-                 const uint64_t *keys_shuffled, struct perf_group *pg)
+                 bench_hash_fn hash_fn, void *const *entries_shuffled,
+                 const bench_hash_t *hashes_shuffled, struct perf_group *pg)
 {
     struct bench_result res = { .name = "insert_rnd" };
     size_t iters = calc_iters(n);
 
-    void *ctx = alloc_ctx(impl);
+    void *ctx = alloc_ctx(impl, hash_fn);
     for (size_t i = 0; i < n; i++)
-        impl->insert(ctx, (void *)(uintptr_t)keys_shuffled[i], keys_shuffled[i]);
+        impl->insert(ctx, entries_shuffled[i], hashes_shuffled[i]);
     free_ctx(impl, ctx);
 
     uint64_t total_ns = 0;
     uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
 
     for (size_t iter = 0; iter < iters; iter++) {
-        ctx = alloc_ctx(impl);
+        ctx = alloc_ctx(impl, hash_fn);
 
         perf_group_reset(pg);
         perf_group_enable(pg);
@@ -414,8 +600,7 @@ bench_insert_rnd(const bench_impl *impl, size_t n,
         COMPILER_BARRIER();
 
         for (size_t i = 0; i < n; i++)
-            impl->insert(ctx, (void *)(uintptr_t)keys_shuffled[i],
-                         keys_shuffled[i]);
+            impl->insert(ctx, entries_shuffled[i], hashes_shuffled[i]);
 
         COMPILER_BARRIER();
         uint64_t t1 = time_ns();
@@ -437,17 +622,18 @@ bench_insert_rnd(const bench_impl *impl, size_t n,
 }
 
 static struct bench_result
-bench_find_hit(const bench_impl *impl, size_t n, const uint64_t *keys,
-               const uint64_t *keys_shuffled, struct perf_group *pg)
+bench_find_hit(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
+               void *const *entries, const bench_hash_t *hashes,
+               const bench_hash_t *hashes_shuffled, struct perf_group *pg)
 {
     struct bench_result res = { .name = "find_hit" };
     size_t iters = calc_iters(n);
 
-    void *ctx = alloc_ctx(impl);
-    populate(impl, ctx, keys, n);
+    void *ctx = alloc_ctx(impl, hash_fn);
+    populate(impl, ctx, entries, hashes, n);
 
     for (size_t i = 0; i < n; i++) {
-        void *p = impl->find(ctx, keys_shuffled[i]);
+        void *p = impl->find(ctx, hashes_shuffled[i]);
         DO_NOT_OPTIMIZE(p);
     }
 
@@ -461,7 +647,7 @@ bench_find_hit(const bench_impl *impl, size_t n, const uint64_t *keys,
         COMPILER_BARRIER();
 
         for (size_t i = 0; i < n; i++) {
-            void *p = impl->find(ctx, keys_shuffled[i]);
+            void *p = impl->find(ctx, hashes_shuffled[i]);
             DO_NOT_OPTIMIZE(p);
         }
 
@@ -485,17 +671,18 @@ bench_find_hit(const bench_impl *impl, size_t n, const uint64_t *keys,
 }
 
 static struct bench_result
-bench_find_miss(const bench_impl *impl, size_t n, const uint64_t *keys,
-                const uint64_t *keys_miss, struct perf_group *pg)
+bench_find_miss(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
+                void *const *entries, const bench_hash_t *hashes,
+                const bench_hash_t *hashes_miss, struct perf_group *pg)
 {
     struct bench_result res = { .name = "find_miss" };
     size_t iters = calc_iters(n);
 
-    void *ctx = alloc_ctx(impl);
-    populate(impl, ctx, keys, n);
+    void *ctx = alloc_ctx(impl, hash_fn);
+    populate(impl, ctx, entries, hashes, n);
 
     for (size_t i = 0; i < n; i++) {
-        void *p = impl->find(ctx, keys_miss[i]);
+        void *p = impl->find(ctx, hashes_miss[i]);
         DO_NOT_OPTIMIZE(p);
     }
 
@@ -509,7 +696,7 @@ bench_find_miss(const bench_impl *impl, size_t n, const uint64_t *keys,
         COMPILER_BARRIER();
 
         for (size_t i = 0; i < n; i++) {
-            void *p = impl->find(ctx, keys_miss[i]);
+            void *p = impl->find(ctx, hashes_miss[i]);
             DO_NOT_OPTIMIZE(p);
         }
 
@@ -533,25 +720,26 @@ bench_find_miss(const bench_impl *impl, size_t n, const uint64_t *keys,
 }
 
 static struct bench_result
-bench_remove_all(const bench_impl *impl, size_t n, const uint64_t *keys,
-                 const uint64_t *keys_shuffled, struct perf_group *pg)
+bench_remove_all(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
+                 void *const *entries, const bench_hash_t *hashes,
+                 void *const *entries_shuffled,
+                 const bench_hash_t *hashes_shuffled, struct perf_group *pg)
 {
     struct bench_result res = { .name = "remove" };
     size_t iters = calc_iters(n);
 
-    void *ctx = alloc_ctx(impl);
-    populate(impl, ctx, keys, n);
+    void *ctx = alloc_ctx(impl, hash_fn);
+    populate(impl, ctx, entries, hashes, n);
     for (size_t i = 0; i < n; i++)
-        impl->remove(ctx, (void *)(uintptr_t)keys_shuffled[i],
-                     keys_shuffled[i]);
+        impl->remove(ctx, entries_shuffled[i], hashes_shuffled[i]);
     free_ctx(impl, ctx);
 
     uint64_t total_ns = 0;
     uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
 
     for (size_t iter = 0; iter < iters; iter++) {
-        ctx = alloc_ctx(impl);
-        populate(impl, ctx, keys, n);
+        ctx = alloc_ctx(impl, hash_fn);
+        populate(impl, ctx, entries, hashes, n);
 
         perf_group_reset(pg);
         perf_group_enable(pg);
@@ -559,8 +747,7 @@ bench_remove_all(const bench_impl *impl, size_t n, const uint64_t *keys,
         COMPILER_BARRIER();
 
         for (size_t i = 0; i < n; i++)
-            impl->remove(ctx, (void *)(uintptr_t)keys_shuffled[i],
-                         keys_shuffled[i]);
+            impl->remove(ctx, entries_shuffled[i], hashes_shuffled[i]);
 
         COMPILER_BARRIER();
         uint64_t t1 = time_ns();
@@ -582,14 +769,15 @@ bench_remove_all(const bench_impl *impl, size_t n, const uint64_t *keys,
 }
 
 static struct bench_result
-bench_iterate(const bench_impl *impl, size_t n,
-              const uint64_t *keys, struct perf_group *pg)
+bench_iterate(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
+              void *const *entries, const bench_hash_t *hashes,
+              struct perf_group *pg)
 {
     struct bench_result res = { .name = "iterate" };
     size_t iters = calc_iters(n);
 
-    void *ctx = alloc_ctx(impl);
-    populate(impl, ctx, keys, n);
+    void *ctx = alloc_ctx(impl, hash_fn);
+    populate(impl, ctx, entries, hashes, n);
 
     impl->for_each(ctx, iter_nop, NULL);
 
@@ -624,8 +812,8 @@ bench_iterate(const bench_impl *impl, size_t n,
 }
 
 static struct bench_result
-bench_mixed(const bench_impl *impl, size_t n,
-            const uint64_t *keys, struct perf_group *pg)
+bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
+            struct perf_group *pg)
 {
     struct bench_result res = { .name = "mixed" };
     size_t iters = calc_iters(n);
@@ -636,14 +824,21 @@ bench_mixed(const bench_impl *impl, size_t n,
 
     enum { OP_FIND = 0, OP_INSERT = 1, OP_REMOVE = 2 };
 
-    uint8_t *ops = malloc(n_ops);
-    size_t *find_idx = malloc(n_ops * sizeof(size_t));
-    uint64_t *extra_keys = malloc(extra * sizeof(uint64_t));
+    uint8_t *ops = xmalloc(n_ops);
+    size_t *find_idx = xmalloc(n_ops * sizeof(size_t));
+    struct bench_entry *extra_entries = extra && keys->mode != BENCH_KEYS_PTR ?
+        xmalloc(extra * sizeof(*extra_entries)) : NULL;
+    void **extra_ptrs = extra ? xmalloc(extra * sizeof(*extra_ptrs)) : NULL;
+    bench_hash_t *extra_hashes = extra ?
+        xmalloc(extra * sizeof(*extra_hashes)) : NULL;
 
     uint64_t saved_state = rng_state;
 
-    for (size_t i = 0; i < extra; i++)
-        extra_keys[i] = rng_next() | 1;
+    for (size_t i = 0; i < extra; i++) {
+        struct bench_entry *entry = extra_entries ? &extra_entries[i] : NULL;
+        bench_make_key(keys->mode, keys->hash_fn, rng_next() | 1, entry,
+                       &extra_ptrs[i], &extra_hashes[i]);
+    }
 
     size_t insert_count = 0;
     size_t remove_count = 0;
@@ -664,26 +859,26 @@ bench_mixed(const bench_impl *impl, size_t n,
         }
     }
 
-    void *ctx = alloc_ctx(impl);
+    void *ctx = alloc_ctx(impl, keys->hash_fn);
     if (impl->reserve)
         impl->reserve(ctx, initial + extra);
     for (size_t i = 0; i < initial; i++)
-        impl->insert(ctx, (void *)(uintptr_t)keys[i], keys[i]);
+        impl->insert(ctx, keys->ptrs[i], keys->hashes[i]);
 
     for (size_t i = 0; i < n_ops; i++) {
         switch (ops[i]) {
         case OP_FIND: {
-            void *p = impl->find(ctx, keys[find_idx[i]]);
+            void *p = impl->find(ctx, keys->hashes[find_idx[i]]);
             DO_NOT_OPTIMIZE(p);
             break;
         }
         case OP_INSERT:
-            impl->insert(ctx, (void *)(uintptr_t)extra_keys[find_idx[i]],
-                         extra_keys[find_idx[i]]);
+            impl->insert(ctx, extra_ptrs[find_idx[i]],
+                         extra_hashes[find_idx[i]]);
             break;
         case OP_REMOVE:
-            impl->remove(ctx, (void *)(uintptr_t)keys[find_idx[i]],
-                         keys[find_idx[i]]);
+            impl->remove(ctx, keys->ptrs[find_idx[i]],
+                         keys->hashes[find_idx[i]]);
             break;
         }
     }
@@ -693,11 +888,11 @@ bench_mixed(const bench_impl *impl, size_t n,
     uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
 
     for (size_t iter = 0; iter < iters; iter++) {
-        ctx = alloc_ctx(impl);
+        ctx = alloc_ctx(impl, keys->hash_fn);
         if (impl->reserve)
             impl->reserve(ctx, initial + extra);
         for (size_t i = 0; i < initial; i++)
-            impl->insert(ctx, (void *)(uintptr_t)keys[i], keys[i]);
+            impl->insert(ctx, keys->ptrs[i], keys->hashes[i]);
 
         perf_group_reset(pg);
         perf_group_enable(pg);
@@ -707,19 +902,17 @@ bench_mixed(const bench_impl *impl, size_t n,
         for (size_t i = 0; i < n_ops; i++) {
             switch (ops[i]) {
             case OP_FIND: {
-                void *p = impl->find(ctx, keys[find_idx[i]]);
+                void *p = impl->find(ctx, keys->hashes[find_idx[i]]);
                 DO_NOT_OPTIMIZE(p);
                 break;
             }
             case OP_INSERT:
-                impl->insert(ctx,
-                             (void *)(uintptr_t)extra_keys[find_idx[i]],
-                             extra_keys[find_idx[i]]);
+                impl->insert(ctx, extra_ptrs[find_idx[i]],
+                             extra_hashes[find_idx[i]]);
                 break;
             case OP_REMOVE:
-                impl->remove(ctx,
-                             (void *)(uintptr_t)keys[find_idx[i]],
-                             keys[find_idx[i]]);
+                impl->remove(ctx, keys->ptrs[find_idx[i]],
+                             keys->hashes[find_idx[i]]);
                 break;
             }
         }
@@ -744,28 +937,37 @@ bench_mixed(const bench_impl *impl, size_t n,
     rng_state = saved_state;
     free(ops);
     free(find_idx);
-    free(extra_keys);
+    free(extra_entries);
+    free(extra_ptrs);
+    free(extra_hashes);
     return res;
 }
 
 static struct bench_result
 run_operation(enum bench_op op, const bench_impl *impl, size_t n,
-              const uint64_t *keys, const uint64_t *keys_shuffled,
-              const uint64_t *keys_miss, struct perf_group *pg)
+              const struct bench_keys *keys, struct perf_group *pg)
 {
     switch (op) {
     case BENCH_INSERT_SEQ:
-        return bench_insert_seq(impl, n, keys, pg);
+        return bench_insert_seq(impl, n, keys->hash_fn, keys->ptrs,
+                                keys->hashes, pg);
     case BENCH_INSERT_RND:
-        return bench_insert_rnd(impl, n, keys_shuffled, pg);
+        return bench_insert_rnd(impl, n, keys->hash_fn,
+                                keys->ptrs_shuffled,
+                                keys->hashes_shuffled, pg);
     case BENCH_FIND_HIT:
-        return bench_find_hit(impl, n, keys, keys_shuffled, pg);
+        return bench_find_hit(impl, n, keys->hash_fn, keys->ptrs,
+                              keys->hashes, keys->hashes_shuffled, pg);
     case BENCH_FIND_MISS:
-        return bench_find_miss(impl, n, keys, keys_miss, pg);
+        return bench_find_miss(impl, n, keys->hash_fn, keys->ptrs,
+                               keys->hashes, keys->hashes_miss, pg);
     case BENCH_REMOVE:
-        return bench_remove_all(impl, n, keys, keys_shuffled, pg);
+        return bench_remove_all(impl, n, keys->hash_fn, keys->ptrs,
+                                keys->hashes, keys->ptrs_shuffled,
+                                keys->hashes_shuffled, pg);
     case BENCH_ITERATE:
-        return bench_iterate(impl, n, keys, pg);
+        return bench_iterate(impl, n, keys->hash_fn, keys->ptrs,
+                             keys->hashes, pg);
     case BENCH_MIXED:
         return bench_mixed(impl, n, keys, pg);
     case BENCH_OP_COUNT:
@@ -775,10 +977,10 @@ run_operation(enum bench_op op, const bench_impl *impl, size_t n,
 }
 
 static size_t
-measure_memory(const bench_impl *impl, const uint64_t *keys, size_t n)
+measure_memory(const bench_impl *impl, const struct bench_keys *keys, size_t n)
 {
-    void *ctx = alloc_ctx(impl);
-    populate(impl, ctx, keys, n);
+    void *ctx = alloc_ctx(impl, keys->hash_fn);
+    populate(impl, ctx, keys->ptrs, keys->hashes, n);
     size_t mem = impl->memory_usage(ctx);
     free_ctx(impl, ctx);
     return mem;
@@ -789,15 +991,16 @@ measure_memory(const bench_impl *impl, const uint64_t *keys, size_t n)
 static void
 print_csv_header(void)
 {
-    printf("size,impl,operation,ns_per_op,l1miss_per_op,llcmiss_per_op,"
+    printf("keys,size,impl,operation,ns_per_op,l1miss_per_op,llcmiss_per_op,"
            "insn_per_op,brmiss_per_op,memory_bytes,bytes_per_entry\n");
 }
 
 static void
-print_csv_result(size_t n, const bench_impl *impl,
+print_csv_result(enum bench_key_mode key_mode, size_t n, const bench_impl *impl,
                  const struct bench_result *r, bool have_perf, size_t memory)
 {
-    printf("%zu,%s,%s,%.3f,", n, impl->name, r->name, result_ns_per_op(r));
+    printf("%s,%zu,%s,%s,%.3f,", bench_key_mode_names[key_mode], n,
+           impl->name, r->name, result_ns_per_op(r));
     if (have_perf) {
         printf("%.3f,%.3f,%.3f,%.3f,",
                result_counter_per_op(r, CTR_L1D_MISS),
@@ -814,20 +1017,12 @@ static void
 run_benchmarks(size_t n, const bench_impl **impls, size_t n_impls,
                const struct bench_options *opts, struct perf_group *pg)
 {
-    printf("\nTable size: %zu\n", n);
+    printf("\nTable size: %zu (%s keys)\n", n,
+           bench_key_mode_names[opts->key_mode]);
 
     rng_seed(0xdeadbeefcafe1234ULL ^ n);
-
-    uint64_t *keys = malloc(n * sizeof(uint64_t));
-    uint64_t *keys_shuffled = malloc(n * sizeof(uint64_t));
-    uint64_t *keys_miss = malloc(n * sizeof(uint64_t));
-
-    for (size_t i = 0; i < n; i++)
-        keys[i] = rng_next() | 1;
-    memcpy(keys_shuffled, keys, n * sizeof(uint64_t));
-    shuffle_u64(keys_shuffled, n);
-    for (size_t i = 0; i < n; i++)
-        keys_miss[i] = rng_next() | 1;
+    struct bench_keys keys;
+    bench_keys_init(&keys, opts->key_mode, n);
 
     for (size_t impl_i = 0; impl_i < n_impls; impl_i++) {
         const bench_impl *impl = impls[impl_i];
@@ -839,7 +1034,7 @@ run_benchmarks(size_t n, const bench_impl **impls, size_t n_impls,
         for (enum bench_op op = 0; op < BENCH_OP_COUNT; op++) {
             if (!op_enabled(opts->op_mask, op))
                 continue;
-            r = run_operation(op, impl, n, keys, keys_shuffled, keys_miss, pg);
+            r = run_operation(op, impl, n, &keys, pg);
             print_result(&r, pg->available);
         }
     }
@@ -855,9 +1050,9 @@ run_benchmarks(size_t n, const bench_impl **impls, size_t n_impls,
         printf(" %10s", "----------");
     printf("\n");
 
-    size_t *mem = malloc(n_impls * sizeof(size_t));
+    size_t *mem = xmalloc(n_impls * sizeof(size_t));
     for (size_t i = 0; i < n_impls; i++)
-        mem[i] = measure_memory(impls[i], keys, n);
+        mem[i] = measure_memory(impls[i], &keys, n);
 
     printf("    %-14s", "total");
     for (size_t i = 0; i < n_impls; i++)
@@ -870,9 +1065,7 @@ run_benchmarks(size_t n, const bench_impl **impls, size_t n_impls,
     printf("\n");
 
     free(mem);
-    free(keys);
-    free(keys_shuffled);
-    free(keys_miss);
+    bench_keys_destroy(&keys);
 }
 
 static void
@@ -883,26 +1076,15 @@ run_compare(size_t n, const bench_impl **impls, size_t n_impls,
         abort();
 
     rng_seed(0xdeadbeefcafe1234ULL ^ n);
-
-    uint64_t *keys = malloc(n * sizeof(uint64_t));
-    uint64_t *keys_shuffled = malloc(n * sizeof(uint64_t));
-    uint64_t *keys_miss = malloc(n * sizeof(uint64_t));
-
-    for (size_t i = 0; i < n; i++)
-        keys[i] = rng_next() | 1;
-    memcpy(keys_shuffled, keys, n * sizeof(uint64_t));
-    shuffle_u64(keys_shuffled, n);
-    for (size_t i = 0; i < n; i++)
-        keys_miss[i] = rng_next() | 1;
+    struct bench_keys keys;
+    bench_keys_init(&keys, opts->key_mode, n);
 
     for (enum bench_op op = 0; op < BENCH_OP_COUNT; op++) {
         if (!op_enabled(opts->op_mask, op))
             continue;
 
-        struct bench_result dshmap = run_operation(op, impls[0], n, keys,
-                                                  keys_shuffled, keys_miss, pg);
-        struct bench_result chained = run_operation(op, impls[1], n, keys,
-                                                    keys_shuffled, keys_miss, pg);
+        struct bench_result dshmap = run_operation(op, impls[0], n, &keys, pg);
+        struct bench_result chained = run_operation(op, impls[1], n, &keys, pg);
         double dshmap_ns = result_ns_per_op(&dshmap);
         double chained_ns = result_ns_per_op(&chained);
         const char *winner = dshmap_ns < chained_ns ? impls[0]->name : impls[1]->name;
@@ -911,9 +1093,7 @@ run_compare(size_t n, const bench_impl **impls, size_t n_impls,
                dshmap_ns / chained_ns, winner);
     }
 
-    free(keys);
-    free(keys_shuffled);
-    free(keys_miss);
+    bench_keys_destroy(&keys);
 }
 
 static void
@@ -921,33 +1101,22 @@ run_csv(size_t n, const bench_impl **impls, size_t n_impls,
         const struct bench_options *opts, struct perf_group *pg)
 {
     rng_seed(0xdeadbeefcafe1234ULL ^ n);
-
-    uint64_t *keys = malloc(n * sizeof(uint64_t));
-    uint64_t *keys_shuffled = malloc(n * sizeof(uint64_t));
-    uint64_t *keys_miss = malloc(n * sizeof(uint64_t));
-
-    for (size_t i = 0; i < n; i++)
-        keys[i] = rng_next() | 1;
-    memcpy(keys_shuffled, keys, n * sizeof(uint64_t));
-    shuffle_u64(keys_shuffled, n);
-    for (size_t i = 0; i < n; i++)
-        keys_miss[i] = rng_next() | 1;
+    struct bench_keys keys;
+    bench_keys_init(&keys, opts->key_mode, n);
 
     for (size_t impl_i = 0; impl_i < n_impls; impl_i++) {
         const bench_impl *impl = impls[impl_i];
-        size_t memory = measure_memory(impl, keys, n);
+        size_t memory = measure_memory(impl, &keys, n);
         for (enum bench_op op = 0; op < BENCH_OP_COUNT; op++) {
             if (!op_enabled(opts->op_mask, op))
                 continue;
-            struct bench_result r = run_operation(op, impl, n, keys,
-                                                  keys_shuffled, keys_miss, pg);
-            print_csv_result(n, impl, &r, pg->available, memory);
+            struct bench_result r = run_operation(op, impl, n, &keys, pg);
+            print_csv_result(opts->key_mode, n, impl, &r, pg->available,
+                             memory);
         }
     }
 
-    free(keys);
-    free(keys_shuffled);
-    free(keys_miss);
+    bench_keys_destroy(&keys);
 }
 
 static void
@@ -960,6 +1129,7 @@ usage(const char *prog, FILE *out)
             "  --sizes LIST          comma-separated sizes, e.g. 1,2,4,8,16\n"
             "  --linear A:B[:STEP]   add every STEP sizes from A through B\n"
             "  --geometric A:B[:MUL] add sizes A, A*MUL, ... through B\n"
+            "  --keys MODE           key workload: ptr, string, expensive\n"
             "  --ops LIST            comma-separated operations or all\n"
             "  --compare             print compact dshmap/chained comparison\n"
             "  --csv                 print machine-readable CSV rows\n"
@@ -1149,6 +1319,25 @@ parse_ops(const char *prog, struct bench_options *opts, const char *arg)
     free(copy);
 }
 
+static bool
+parse_key_mode_name(const char *name, enum bench_key_mode *mode)
+{
+    for (enum bench_key_mode i = 0; i < BENCH_KEYS_COUNT; i++) {
+        if (strcmp(name, bench_key_mode_names[i]) == 0) {
+            *mode = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void
+parse_key_mode(const char *prog, struct bench_options *opts, const char *arg)
+{
+    if (!parse_key_mode_name(arg, &opts->key_mode))
+        die_usage(prog, "invalid --keys value");
+}
+
 static void
 parse_args(int argc, char **argv, struct bench_options *opts)
 {
@@ -1157,6 +1346,7 @@ parse_args(int argc, char **argv, struct bench_options *opts)
     opts->sizes_cap = 0;
     opts->min_total_ops = DEFAULT_MIN_TOTAL_OPS;
     opts->op_mask = (1u << BENCH_OP_COUNT) - 1;
+    opts->key_mode = BENCH_KEYS_PTR;
     opts->mode = OUTPUT_DETAIL;
     opts->use_perf = true;
 
@@ -1176,6 +1366,10 @@ parse_args(int argc, char **argv, struct bench_options *opts)
             if (++i == argc)
                 die_usage(argv[0], "--geometric requires an argument");
             parse_geometric(argv[0], opts, argv[i]);
+        } else if (strcmp(argv[i], "--keys") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--keys requires an argument");
+            parse_key_mode(argv[0], opts, argv[i]);
         } else if (strcmp(argv[i], "--ops") == 0) {
             if (++i == argc)
                 die_usage(argv[0], "--ops requires an argument");
@@ -1210,6 +1404,7 @@ main(int argc, char **argv)
     if (opts.mode != OUTPUT_CSV) {
         printf("Hash Table Benchmark\n");
         printf("====================\n");
+        printf("Key workload: %s\n", bench_key_mode_names[opts.key_mode]);
     }
 
     struct perf_group pg;

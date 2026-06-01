@@ -148,8 +148,12 @@ when available via `perf_event_open`.
 
 The benchmark can also scan arbitrary table sizes. Use `--linear A:B[:STEP]`
 for every size in a range, `--geometric A:B[:MUL]` for powers, `--sizes`
-for explicit lists, `--ops` to limit operations, `--compare` for a compact
+for explicit lists, `--keys ptr|string|expensive` to switch key/hash
+workloads, `--ops` to limit operations, `--compare` for a compact
 dshmap/chained crossover table, or `--csv` for machine-readable output.
+The `ptr` workload is the original integer-as-pointer benchmark; `string`
+uses fixed string entries; `expensive` uses the same entries with a
+deliberately expensive hash function.
 
 The benchmark compares dshmap against a chained hash map (separate chaining
 with linked lists). Adding your own implementation

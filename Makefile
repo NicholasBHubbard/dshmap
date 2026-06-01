@@ -12,6 +12,8 @@ test: tests/test.c tests/test_oom.c bench/bench.c dshmap.h
 	$(CC) $(CFLAGS) -o bench/bench bench/bench.c
 	./bench/bench --compare --sizes 1,2 --ops find_hit,mixed --min-ops 1 --no-perf >/dev/null
 	./bench/bench --csv --linear 1:3 --ops find_miss --min-ops 1 --no-perf >/dev/null
+	./bench/bench --compare --sizes 2 --keys string --ops find_hit --min-ops 1 --no-perf >/dev/null
+	./bench/bench --csv --sizes 2 --keys expensive --ops find_miss --min-ops 1 --no-perf >/dev/null
 
 test-asan: tests/test.c tests/test_oom.c dshmap.h
 	$(CC) $(CFLAGS) $(ASANFLAGS) -o tests/test-asan tests/test.c
