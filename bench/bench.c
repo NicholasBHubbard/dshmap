@@ -12,7 +12,7 @@
 #include <linux/perf_event.h>
 
 #include "bench_impl.h"
-#include "impl_swtab.h"
+#include "impl_dshmap.h"
 #include "impl_chained.h"
 
 #define DO_NOT_OPTIMIZE(val) __asm__ volatile("" : "+r"(val) :: "memory")
@@ -899,16 +899,16 @@ run_compare(size_t n, const bench_impl **impls, size_t n_impls,
         if (!op_enabled(opts->op_mask, op))
             continue;
 
-        struct bench_result swtab = run_operation(op, impls[0], n, keys,
+        struct bench_result dshmap = run_operation(op, impls[0], n, keys,
                                                   keys_shuffled, keys_miss, pg);
         struct bench_result chained = run_operation(op, impls[1], n, keys,
                                                     keys_shuffled, keys_miss, pg);
-        double swtab_ns = result_ns_per_op(&swtab);
+        double dshmap_ns = result_ns_per_op(&dshmap);
         double chained_ns = result_ns_per_op(&chained);
-        const char *winner = swtab_ns < chained_ns ? impls[0]->name : impls[1]->name;
+        const char *winner = dshmap_ns < chained_ns ? impls[0]->name : impls[1]->name;
         printf("%8zu %-12s %10.3f %10.3f %8.3f %8s\n",
-               n, bench_op_names[op], swtab_ns, chained_ns,
-               swtab_ns / chained_ns, winner);
+               n, bench_op_names[op], dshmap_ns, chained_ns,
+               dshmap_ns / chained_ns, winner);
     }
 
     free(keys);
@@ -961,7 +961,7 @@ usage(const char *prog, FILE *out)
             "  --linear A:B[:STEP]   add every STEP sizes from A through B\n"
             "  --geometric A:B[:MUL] add sizes A, A*MUL, ... through B\n"
             "  --ops LIST            comma-separated operations or all\n"
-            "  --compare             print compact swtab/chained comparison\n"
+            "  --compare             print compact dshmap/chained comparison\n"
             "  --csv                 print machine-readable CSV rows\n"
             "  --min-ops N           target at least N operations per benchmark\n"
             "  --no-perf             skip hardware performance counters\n"
@@ -1222,12 +1222,12 @@ main(int argc, char **argv)
         printf("\nNOTE: Hardware perf counters unavailable; "
                "reporting wall time only.\n");
 
-    const bench_impl *impls[] = { &impl_swtab, &impl_chained };
+    const bench_impl *impls[] = { &impl_dshmap, &impl_chained };
     size_t n_impls = sizeof(impls) / sizeof(impls[0]);
 
     if (opts.mode == OUTPUT_COMPARE) {
         printf("\n%8s %-12s %10s %10s %8s %8s\n",
-               "size", "operation", "swtab", "chained", "ratio", "winner");
+               "size", "operation", "dshmap", "chained", "ratio", "winner");
         printf("%8s %-12s %10s %10s %8s %8s\n",
                "--------", "------------", "----------", "----------",
                "--------", "--------");

@@ -1,10 +1,10 @@
-# swtab
+# dshmap
 
-swtab is a header-only C99 dense-to-swiss hash map.
+dshmap is a header-only C99 dense-to-swiss hash map.
 
 ## Features
 
-- **Hybrid layout**: small tables use a dense open-addressed layout, then promote to the Swiss-table layout after `SWTAB_DENSE_THRESHOLD` entries
+- **Hybrid layout**: small tables use a dense open-addressed layout, then promote to the Swiss-table layout after `DSHMAP_DENSE_THRESHOLD` entries
 - **Scale-oriented**: flat layouts reduce pointer chasing and cache misses; the largest Swiss-table wins show up on large tables, especially misses, removes, iteration, and memory use ([see benchmarks](#benchmarks))
 - **Cache-friendly**: contiguous control bytes and slots improve locality compared with pointer-heavy tables
 - **Header-only**: single file, no build system integration, no dependencies beyond the C standard library
@@ -13,10 +13,10 @@ swtab is a header-only C99 dense-to-swiss hash map.
 
 ## Usage
 
-Copy `swtab.h` into your project and include it:
+Copy `dshmap.h` into your project and include it:
 
 ```c
-#include "swtab.h"
+#include "dshmap.h"
 ```
 
 No build system integration needed: single header, no dependencies beyond the C standard library.
@@ -24,79 +24,79 @@ No build system integration needed: single header, no dependencies beyond the C 
 ## Quick Example
 
 ```c
-#include "swtab.h"
+#include "dshmap.h"
 #include <stdio.h>
 #include <stdlib.h>
 
-static swtab_hash_t entry_hash(const void *entry) {
-    return (swtab_hash_t)(uintptr_t)entry;
+static dshmap_hash_t entry_hash(const void *entry) {
+    return (dshmap_hash_t)(uintptr_t)entry;
 }
 
 int main(void) {
-    swtab st;
-    swtab_init(&st, entry_hash);
-    swtab_reserve(&st, 1000000);
+    dshmap st;
+    dshmap_init(&st, entry_hash);
+    dshmap_reserve(&st, 1000000);
 
     for (uintptr_t i = 1; i <= 1000000; i++)
-        swtab_insert(&st, (void *)i, i);
+        dshmap_insert(&st, (void *)i, i);
 
-    void *found = swtab_find(&st, 500000);
+    void *found = dshmap_find(&st, 500000);
     printf("found key %ld in %zu entries\n",
-           (long)(uintptr_t)found, swtab_size(&st));
+           (long)(uintptr_t)found, dshmap_size(&st));
 
-    swtab_destroy(&st);
+    dshmap_destroy(&st);
 }
 ```
 
 ## API
 
-Full documentation is in `swtab.h`.
+Full documentation is in `dshmap.h`.
 
 | Function | Description |
 |---|---|
-| `swtab_init` | Initialize a table |
-| `swtab_destroy` | Free table memory |
-| `swtab_size` | Number of entries |
-| `swtab_is_empty` | Check if empty |
-| `swtab_clear` | Remove all entries, keep capacity |
-| `swtab_reserve` | Pre-allocate capacity |
-| `swtab_insert` | Insert a non-`NULL` entry; inserting the same entry pointer twice without removing it first is unsupported |
-| `swtab_remove` | Remove an entry by pointer |
-| `swtab_find` | Look up by hash; use `swtab_find_key` when key equality matters |
-| `swtab_find_key` | Look up by hash and key equality; key-aware form of `swtab_find` |
-| `swtab_find_key_next` | Continue a key-aware lookup through duplicate logical keys |
-| `swtab_find_next` | Continue a lookup through distinct entries with the same hash |
-| `SWTAB_FOR_EACH` | Iterate all entries |
+| `dshmap_init` | Initialize a table |
+| `dshmap_destroy` | Free table memory |
+| `dshmap_size` | Number of entries |
+| `dshmap_is_empty` | Check if empty |
+| `dshmap_clear` | Remove all entries, keep capacity |
+| `dshmap_reserve` | Pre-allocate capacity |
+| `dshmap_insert` | Insert a non-`NULL` entry; inserting the same entry pointer twice without removing it first is unsupported |
+| `dshmap_remove` | Remove an entry by pointer |
+| `dshmap_find` | Look up by hash; use `dshmap_find_key` when key equality matters |
+| `dshmap_find_key` | Look up by hash and key equality; key-aware form of `dshmap_find` |
+| `dshmap_find_key_next` | Continue a key-aware lookup through duplicate logical keys |
+| `dshmap_find_next` | Continue a lookup through distinct entries with the same hash |
+| `DSHMAP_FOR_EACH` | Iterate all entries |
 
-`NULL` entries are not supported. `swtab` uses `NULL` as the lookup miss result
+`NULL` entries are not supported. `dshmap` uses `NULL` as the lookup miss result
 and as an iteration sentinel.
 
-Define `SWTAB_DENSE_THRESHOLD` before including `swtab.h` to tune the hybrid
+Define `DSHMAP_DENSE_THRESHOLD` before including `dshmap.h` to tune the hybrid
 cutover. The default is `2048`. Define it as `0` to disable dense mode and use
 the Swiss layout from the first insertion.
 
 Hash caching is independently configurable per layout:
 
 ```c
-#define SWTAB_DENSE_STORE_HASHES 1
-#define SWTAB_SWISS_STORE_HASHES 0
-#include "swtab.h"
+#define DSHMAP_DENSE_STORE_HASHES 1
+#define DSHMAP_SWISS_STORE_HASHES 0
+#include "dshmap.h"
 ```
 
 Those are the defaults. Disabling hash storage saves memory but recomputes
 hashes during some lookups, removals, and resizes. Enabling Swiss hash storage
-adds one `swtab_hash_t` per slot and can help when hash functions are expensive
+adds one `dshmap_hash_t` per slot and can help when hash functions are expensive
 or collision-heavy lookups are common.
 
 ## Allocation Failure
 
 Allocation failure is fatal by default. If allocation fails, or if size
-arithmetic overflows while growing/reserving, `swtab` calls `SWTAB_OOM()`.
+arithmetic overflows while growing/reserving, `dshmap` calls `DSHMAP_OOM()`.
 The default hook calls `abort()`.
 
-Define `SWTAB_OOM`, `SWTAB_MALLOC`, and `SWTAB_FREE` before including
-`swtab.h` to customize allocation behavior. `SWTAB_OOM()` should not return
-normally; if it does, `swtab` aborts.
+Define `DSHMAP_OOM`, `DSHMAP_MALLOC`, and `DSHMAP_FREE` before including
+`dshmap.h` to customize allocation behavior. `DSHMAP_OOM()` should not return
+normally; if it does, `dshmap` aborts.
 
 ## Building
 
@@ -114,7 +114,7 @@ Run with AddressSanitizer and UndefinedBehaviorSanitizer:
 make test-asan
 ```
 
-Run the comparative benchmark (swtab vs chained hash map):
+Run the comparative benchmark (dshmap vs chained hash map):
 
 ```
 make bench
@@ -129,7 +129,7 @@ make bench BENCH_ARGS="--compare --geometric 1:65536:2 --ops find_hit,find_miss,
 
 ## Performance Profile
 
-`swtab` is designed for large, cache-sensitive tables. Its flat layout tends
+`dshmap` is designed for large, cache-sensitive tables. Its flat layout tends
 to pay off once pointer chasing and cache misses dominate.
 
 Dense mode reduces small-table overhead, especially for inserts, removes, and
@@ -149,16 +149,16 @@ when available via `perf_event_open`.
 The benchmark can also scan arbitrary table sizes. Use `--linear A:B[:STEP]`
 for every size in a range, `--geometric A:B[:MUL]` for powers, `--sizes`
 for explicit lists, `--ops` to limit operations, `--compare` for a compact
-swtab/chained crossover table, or `--csv` for machine-readable output.
+dshmap/chained crossover table, or `--csv` for machine-readable output.
 
-The benchmark compares swtab against a chained hash map (separate chaining
+The benchmark compares dshmap against a chained hash map (separate chaining
 with linked lists). Adding your own implementation
 is straightforward: write an `impl_foo.h` adapter with the `bench_impl`
 vtable and add it to the `impls[]` array in `bench/bench.c`.
 
 ### Small/L2-Resident: Mixed Results
 
-| Operation | swtab (ns/op) | chained (ns/op) |
+| Operation | dshmap (ns/op) | chained (ns/op) |
 |---|---|---|
 | insert_seq | 11.2 | 19.4 |
 | find_hit | 3.8 | 2.0 |
@@ -168,7 +168,7 @@ vtable and add it to the `impls[]` array in `bench/bench.c`.
 
 ### Large/Beyond L3: Strong Wins
 
-| Operation | swtab (ns/op) | chained (ns/op) |
+| Operation | dshmap (ns/op) | chained (ns/op) |
 |---|---|---|
 | insert_seq | 28.9 | 46.0 |
 | find_hit | 24.0 | 45.8 |
@@ -178,7 +178,7 @@ vtable and add it to the `impls[]` array in `bench/bench.c`.
 
 ### Memory
 
-| | swtab | chained |
+| | dshmap | chained |
 |---|---|---|
 | bytes/entry | 18.0 | 32.0 |
 
