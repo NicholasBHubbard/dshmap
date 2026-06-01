@@ -779,6 +779,47 @@ dshmap__dense_erase_at(dshmap *st, size_t hole)
     st->growth_left = dshmap__dense_growth_left(st);
 }
 
+static inline void
+dshmap__swiss_insert(dshmap *st, void *entry, dshmap_hash_t hash)
+{
+    uint8_t h2 = dshmap__h2(hash);
+
+    if (DSHMAP__UNLIKELY(st->growth_left == 0)) {
+        DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
+            uint64_t deleted = dshmap__ctrl_deleted(ctrl);
+            if (deleted) {
+                size_t pos = dshmap__slot_pos(index, dshmap__match_slot(deleted));
+                st->ctrl[pos] = (int8_t)h2;
+                dshmap__set_slot_hash(st, pos, hash);
+                st->slots[pos] = entry;
+                st->size++;
+                return;
+            }
+
+            if (dshmap__group_has_empty(ctrl)) {
+                break;
+            }
+        }
+        dshmap__swiss_grow(st);
+    }
+
+    DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
+        uint64_t available = dshmap__ctrl_available(ctrl);
+        if (DSHMAP__LIKELY(available)) {
+            size_t pos = dshmap__slot_pos(index, dshmap__match_slot(available));
+            bool was_empty = (st->ctrl[pos] == DSHMAP__EMPTY);
+            st->ctrl[pos] = (int8_t)h2;
+            dshmap__set_slot_hash(st, pos, hash);
+            st->slots[pos] = entry;
+            st->size++;
+            if (DSHMAP__LIKELY(was_empty)) {
+                st->growth_left--;
+            }
+            return;
+        }
+    }
+}
+
 /* ===========================================================================
  *                             IMPLEMENTATION
  * =========================================================================== */
@@ -826,12 +867,14 @@ dshmap_clear(dshmap *st)
         memset(st->ctrl, DSHMAP__EMPTY, cap);
         st->size = 0;
         st->growth_left = dshmap__dense_growth_left_for_cap(cap);
-    } else if (dshmap__is_allocated(st)) {
-        size_t cap = dshmap__capacity_from_groups(
-            dshmap__checked_add(st->group_mask, 1));
-        memset(st->ctrl, DSHMAP__EMPTY, cap);
-        st->size = 0;
-        st->growth_left = dshmap__growth_left_for_cap(cap);
+    } else {
+        if (dshmap__is_allocated(st)) {
+            size_t cap = dshmap__capacity_from_groups(
+                dshmap__checked_add(st->group_mask, 1));
+            memset(st->ctrl, DSHMAP__EMPTY, cap);
+            st->size = 0;
+            st->growth_left = dshmap__growth_left_for_cap(cap);
+        }
     }
 }
 
@@ -857,22 +900,22 @@ dshmap_reserve(dshmap *st, size_t count)
         }
         dshmap__promote_to_swiss(st, count);
         return;
-    }
-
-    if (count <= st->size + st->growth_left) {
-        return;
-    }
-
-    bool was_allocated = dshmap__is_allocated(st);
-    size_t new_groups;
-    if (!was_allocated) {
-        new_groups = 1;
     } else {
-        new_groups = dshmap__checked_mul(
-            dshmap__checked_add(st->group_mask, 1), 2);
+        if (count <= st->size + st->growth_left) {
+            return;
+        }
+
+        bool was_allocated = dshmap__is_allocated(st);
+        size_t new_groups;
+        if (!was_allocated) {
+            new_groups = 1;
+        } else {
+            new_groups = dshmap__checked_mul(
+                dshmap__checked_add(st->group_mask, 1), 2);
+        }
+        new_groups = dshmap__groups_for_count(count, new_groups);
+        dshmap__swiss_grow_to(st, new_groups);
     }
-    new_groups = dshmap__groups_for_count(count, new_groups);
-    dshmap__swiss_grow_to(st, new_groups);
 }
 
 static inline void
@@ -882,54 +925,20 @@ dshmap_insert(dshmap *st, void *entry, dshmap_hash_t hash)
         size_t count = dshmap__checked_add(st->size, 1);
         if (DSHMAP__UNLIKELY(count > DSHMAP_DENSE_THRESHOLD)) {
             dshmap__promote_to_swiss(st, count);
+            dshmap__swiss_insert(st, entry, hash);
         } else {
             if (DSHMAP__UNLIKELY(st->growth_left == 0)) {
                 dshmap__dense_grow_for_count(st, count);
             }
             dshmap__dense_insert_no_grow(st, entry, hash);
-            return;
         }
-    } else if (DSHMAP__UNLIKELY(!dshmap__is_allocated(st)) &&
-               DSHMAP_DENSE_THRESHOLD != 0) {
-        dshmap__dense_alloc(st, dshmap__dense_cap_for_count(1));
-        dshmap__dense_insert_no_grow(st, entry, hash);
-        return;
-    }
-
-    uint8_t h2 = dshmap__h2(hash);
-
-    if (DSHMAP__UNLIKELY(st->growth_left == 0)) {
-        DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
-            uint64_t deleted = dshmap__ctrl_deleted(ctrl);
-            if (deleted) {
-                size_t pos = dshmap__slot_pos(index, dshmap__match_slot(deleted));
-                st->ctrl[pos] = (int8_t)h2;
-                dshmap__set_slot_hash(st, pos, hash);
-                st->slots[pos] = entry;
-                st->size++;
-                return;
-            }
-
-            if (dshmap__group_has_empty(ctrl)) {
-                break;
-            }
-        }
-        dshmap__swiss_grow(st);
-    }
-
-    DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
-        uint64_t available = dshmap__ctrl_available(ctrl);
-        if (DSHMAP__LIKELY(available)) {
-            size_t pos = dshmap__slot_pos(index, dshmap__match_slot(available));
-            bool was_empty = (st->ctrl[pos] == DSHMAP__EMPTY);
-            st->ctrl[pos] = (int8_t)h2;
-            dshmap__set_slot_hash(st, pos, hash);
-            st->slots[pos] = entry;
-            st->size++;
-            if (DSHMAP__LIKELY(was_empty)) {
-                st->growth_left--;
-            }
-            return;
+    } else {
+        if (DSHMAP__UNLIKELY(!dshmap__is_allocated(st)) &&
+            DSHMAP_DENSE_THRESHOLD != 0) {
+            dshmap__dense_alloc(st, dshmap__dense_cap_for_count(1));
+            dshmap__dense_insert_no_grow(st, entry, hash);
+        } else {
+            dshmap__swiss_insert(st, entry, hash);
         }
     }
 }
@@ -949,30 +958,31 @@ dshmap_remove(dshmap *st, const void *entry, dshmap_hash_t hash)
             pos = (pos + 1) & mask;
         }
         return;
-    }
-
-    uint8_t h2 = dshmap__h2(hash);
-    DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
-        uint64_t match = dshmap__ctrl_match(ctrl, h2);
-        while (match) {
-            size_t pos = dshmap__slot_pos(index, dshmap__ctrl_next_match(&match));
-            if ((st->hashes == NULL || st->hashes[pos] == hash) &&
-                st->slots[pos] == entry) {
-                uint64_t empty = dshmap__group_has_empty(ctrl);
-                st->ctrl[pos] = empty ? DSHMAP__EMPTY : DSHMAP__DELETED;
-                if (st->hashes != NULL) {
-                    st->hashes[pos] = 0;
+    } else {
+        uint8_t h2 = dshmap__h2(hash);
+        DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
+            uint64_t match = dshmap__ctrl_match(ctrl, h2);
+            while (match) {
+                size_t pos = dshmap__slot_pos(index,
+                                              dshmap__ctrl_next_match(&match));
+                if ((st->hashes == NULL || st->hashes[pos] == hash) &&
+                    st->slots[pos] == entry) {
+                    uint64_t empty = dshmap__group_has_empty(ctrl);
+                    st->ctrl[pos] = empty ? DSHMAP__EMPTY : DSHMAP__DELETED;
+                    if (st->hashes != NULL) {
+                        st->hashes[pos] = 0;
+                    }
+                    st->slots[pos] = NULL;
+                    st->size--;
+                    if (empty) {
+                        st->growth_left++;
+                    }
+                    return;
                 }
-                st->slots[pos] = NULL;
-                st->size--;
-                if (empty) {
-                    st->growth_left++;
-                }
+            }
+            if (dshmap__group_has_empty(ctrl)) {
                 return;
             }
-        }
-        if (dshmap__group_has_empty(ctrl)) {
-            return;
         }
     }
 }
@@ -990,23 +1000,24 @@ dshmap_find(const dshmap *st, dshmap_hash_t hash)
             pos = (pos + 1) & mask;
         }
         return NULL;
-    }
+    } else {
+        uint8_t h2 = dshmap__h2(hash);
+        DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
+            uint64_t match = dshmap__ctrl_match(ctrl, h2);
+            while (match) {
+                size_t pos = dshmap__slot_pos(index,
+                                              dshmap__ctrl_next_match(&match));
+                if (dshmap__slot_hash(st, pos) == hash) {
+                    return st->slots[pos];
+                }
+            }
 
-    uint8_t h2 = dshmap__h2(hash);
-    DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
-        uint64_t match = dshmap__ctrl_match(ctrl, h2);
-        while (match) {
-            size_t pos = dshmap__slot_pos(index, dshmap__ctrl_next_match(&match));
-            if (dshmap__slot_hash(st, pos) == hash) {
-                return st->slots[pos];
+            if (dshmap__group_has_empty(ctrl)) {
+                return NULL;
             }
         }
-
-        if (dshmap__group_has_empty(ctrl)) {
-            return NULL;
-        }
+        return NULL;
     }
-    return NULL;
 }
 
 static inline void *
@@ -1026,24 +1037,25 @@ dshmap_find_key(const dshmap *st, dshmap_hash_t hash, const void *key,
             pos = (pos + 1) & mask;
         }
         return NULL;
-    }
+    } else {
+        uint8_t h2 = dshmap__h2(hash);
+        DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
+            uint64_t match = dshmap__ctrl_match(ctrl, h2);
+            while (match) {
+                size_t pos = dshmap__slot_pos(index,
+                                              dshmap__ctrl_next_match(&match));
+                if ((st->hashes == NULL || st->hashes[pos] == hash) &&
+                    eq_fn(st->slots[pos], key)) {
+                    return st->slots[pos];
+                }
+            }
 
-    uint8_t h2 = dshmap__h2(hash);
-    DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
-        uint64_t match = dshmap__ctrl_match(ctrl, h2);
-        while (match) {
-            size_t pos = dshmap__slot_pos(index, dshmap__ctrl_next_match(&match));
-            if ((st->hashes == NULL || st->hashes[pos] == hash) &&
-                eq_fn(st->slots[pos], key)) {
-                return st->slots[pos];
+            if (dshmap__group_has_empty(ctrl)) {
+                return NULL;
             }
         }
-
-        if (dshmap__group_has_empty(ctrl)) {
-            return NULL;
-        }
+        return NULL;
     }
-    return NULL;
 }
 
 static inline void *
@@ -1068,31 +1080,32 @@ dshmap_find_key_next(const dshmap *st, dshmap_hash_t hash, const void *key,
             pos = (pos + 1) & mask;
         }
         return NULL;
-    }
-
-    uint8_t h2 = dshmap__h2(hash);
-    bool found_prev = false;
-    DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
-        uint64_t match = dshmap__ctrl_match(ctrl, h2);
-        while (match) {
-            size_t pos = dshmap__slot_pos(index, dshmap__ctrl_next_match(&match));
-            if (!found_prev) {
-                if (st->slots[pos] == prev) {
-                    found_prev = true;
+    } else {
+        uint8_t h2 = dshmap__h2(hash);
+        bool found_prev = false;
+        DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
+            uint64_t match = dshmap__ctrl_match(ctrl, h2);
+            while (match) {
+                size_t pos = dshmap__slot_pos(index,
+                                              dshmap__ctrl_next_match(&match));
+                if (!found_prev) {
+                    if (st->slots[pos] == prev) {
+                        found_prev = true;
+                    }
+                    continue;
                 }
-                continue;
+                if ((st->hashes == NULL || st->hashes[pos] == hash) &&
+                    eq_fn(st->slots[pos], key)) {
+                    return st->slots[pos];
+                }
             }
-            if ((st->hashes == NULL || st->hashes[pos] == hash) &&
-                eq_fn(st->slots[pos], key)) {
-                return st->slots[pos];
-            }
-        }
 
-        if (dshmap__group_has_empty(ctrl)) {
-            return NULL;
+            if (dshmap__group_has_empty(ctrl)) {
+                return NULL;
+            }
         }
+        return NULL;
     }
-    return NULL;
 }
 
 static inline void *
@@ -1113,30 +1126,31 @@ dshmap_find_next(const dshmap *st, dshmap_hash_t hash, const void *prev)
             pos = (pos + 1) & mask;
         }
         return NULL;
-    }
-
-    uint8_t h2 = dshmap__h2(hash);
-    bool found_prev = false;
-    DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
-        uint64_t match = dshmap__ctrl_match(ctrl, h2);
-        while (match) {
-            size_t pos = dshmap__slot_pos(index, dshmap__ctrl_next_match(&match));
-            if (!found_prev) {
-                if (st->slots[pos] == prev) {
-                    found_prev = true;
+    } else {
+        uint8_t h2 = dshmap__h2(hash);
+        bool found_prev = false;
+        DSHMAP__FOR_EACH_GROUP(st, hash, index, ctrl) {
+            uint64_t match = dshmap__ctrl_match(ctrl, h2);
+            while (match) {
+                size_t pos = dshmap__slot_pos(index,
+                                              dshmap__ctrl_next_match(&match));
+                if (!found_prev) {
+                    if (st->slots[pos] == prev) {
+                        found_prev = true;
+                    }
+                    continue;
                 }
-                continue;
+                if (dshmap__slot_hash(st, pos) == hash) {
+                    return st->slots[pos];
+                }
             }
-            if (dshmap__slot_hash(st, pos) == hash) {
-                return st->slots[pos];
-            }
-        }
 
-        if (dshmap__group_has_empty(ctrl)) {
-            return NULL;
+            if (dshmap__group_has_empty(ctrl)) {
+                return NULL;
+            }
         }
+        return NULL;
     }
-    return NULL;
 }
 
 #endif
