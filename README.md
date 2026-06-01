@@ -7,6 +7,7 @@ dshmap is a header only C99 Swiss-style hash map with a dense small-table fast p
 - **Hybrid layout**: small tables use a dense open-addressed layout, then promote to the Swiss-table layout after `DSHMAP_DENSE_THRESHOLD` entries
 - **Scale-oriented**: flat layouts reduce pointer chasing and cache misses; the largest Swiss-table wins show up on large tables, especially misses, removes, iteration, and memory use ([see benchmarks](#benchmarks))
 - **Cache-friendly**: contiguous control bytes and slots improve locality compared with pointer-heavy tables
+- **Configurable hash storage**: store full hashes per slot when hash functions are expensive, or omit them to reduce memory use
 - **Header-only**: single file, no build system integration, no dependencies beyond the C standard library
 - **Generic**: stores caller-owned non-`NULL` `void *` entries; each entry pointer may be present at most once
 - **Small**: ~9 bytes/entry overhead in Swiss mode at typical load factors
@@ -75,7 +76,8 @@ Define `DSHMAP_DENSE_THRESHOLD` before including `dshmap.h` to tune the hybrid
 cutover. The default is `2048`. Define it as `0` to disable dense mode and use
 the Swiss layout from the first insertion.
 
-Hash caching is independently configurable per layout:
+Hash storage is independently configurable for dense and Swiss layouts. Define
+these macros before including `dshmap.h`:
 
 ```c
 #define DSHMAP_DENSE_STORE_HASHES 1
@@ -83,10 +85,12 @@ Hash caching is independently configurable per layout:
 #include "dshmap.h"
 ```
 
-Those are the defaults. Disabling hash storage saves memory but recomputes
-hashes during some lookups, removals, and resizes. Enabling Swiss hash storage
-adds one `dshmap_hash_t` per slot and can help when hash functions are expensive
-or collision-heavy lookups are common.
+Those are the defaults: dense mode stores full hashes because small tables are
+sensitive to repeated hash recomputation, while Swiss mode omits them to keep
+large tables compact. Disabling hash storage saves one `dshmap_hash_t` per slot
+but recomputes hashes during some lookups, removals, and resizes. Enabling hash
+storage can help when hash functions are expensive or collision-heavy lookups
+are common.
 
 ## Allocation Failure
 

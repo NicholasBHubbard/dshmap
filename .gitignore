@@ -1,5 +1,7 @@
 tests/test
 tests/test-asan
+tests/test-small-threshold
+tests/test-small-threshold-asan
 tests/test-oom
 tests/test-oom-asan
 tests/test-cov

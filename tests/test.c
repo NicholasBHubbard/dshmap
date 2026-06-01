@@ -714,6 +714,134 @@ test_dense_promotes_to_swiss_at_threshold(void)
 }
 
 static void
+test_dense_to_swiss_post_promotion_operations(void)
+{
+    size_t threshold = DSHMAP_DENSE_THRESHOLD;
+    if (threshold < 4) {
+        return;
+    }
+
+    dshmap st;
+    dshmap_init(&st, hashed_entry_hash);
+
+    size_t n = threshold + 3;
+    struct hashed_entry *entries = malloc(n * sizeof(*entries));
+    bool *seen = calloc(n, sizeof(*seen));
+    assert(entries != NULL);
+    assert(seen != NULL);
+
+    dshmap_hash_t shared_hash = 0x55;
+    for (size_t i = 0; i < n; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = ((dshmap_hash_t)(i + 1) << 8) | 0xA6;
+    }
+    entries[0].key = 777;
+    entries[0].hash = shared_hash;
+    entries[1].key = 777;
+    entries[1].hash = shared_hash;
+    entries[2].key = 888;
+    entries[2].hash = shared_hash;
+    entries[3].key = 999;
+    entries[3].hash = shared_hash + 0x80;
+
+    for (size_t i = 0; i < threshold; i++) {
+        dshmap_insert(&st, &entries[i], entries[i].hash);
+        assert(st.dense);
+    }
+
+    size_t shared_count = 0;
+    for (void *e = dshmap_find(&st, shared_hash); e;
+         e = dshmap_find_next(&st, shared_hash, e)) {
+        assert(e == &entries[0] || e == &entries[1] || e == &entries[2]);
+        shared_count++;
+    }
+    assert(shared_count == 3);
+
+    int key = 777;
+    void *first = dshmap_find_key(&st, shared_hash, &key, hashed_entry_eq);
+    void *second = dshmap_find_key_next(&st, shared_hash, &key,
+                                       hashed_entry_eq, first);
+    void *third = dshmap_find_key_next(&st, shared_hash, &key,
+                                      hashed_entry_eq, second);
+    assert((first == &entries[0] && second == &entries[1]) ||
+           (first == &entries[1] && second == &entries[0]));
+    assert(third == NULL);
+
+    dshmap_insert(&st, &entries[threshold], entries[threshold].hash);
+    assert(!st.dense);
+    assert(dshmap_size(&st) == threshold + 1);
+
+    shared_count = 0;
+    for (void *e = dshmap_find(&st, shared_hash); e;
+         e = dshmap_find_next(&st, shared_hash, e)) {
+        assert(e == &entries[0] || e == &entries[1] || e == &entries[2]);
+        shared_count++;
+    }
+    assert(shared_count == 3);
+
+    first = dshmap_find_key(&st, shared_hash, &key, hashed_entry_eq);
+    second = dshmap_find_key_next(&st, shared_hash, &key,
+                                 hashed_entry_eq, first);
+    third = dshmap_find_key_next(&st, shared_hash, &key,
+                                hashed_entry_eq, second);
+    assert((first == &entries[0] && second == &entries[1]) ||
+           (first == &entries[1] && second == &entries[0]));
+    assert(third == NULL);
+
+    dshmap_remove(&st, &entries[1], entries[1].hash);
+    dshmap_remove(&st, &entries[threshold], entries[threshold].hash);
+    assert(dshmap_size(&st) == threshold - 1);
+    assert(dshmap_find(&st, entries[threshold].hash) == NULL);
+    assert(dshmap_find_key(&st, shared_hash, &key, hashed_entry_eq) ==
+           &entries[0]);
+    assert(dshmap_find_key_next(&st, shared_hash, &key,
+                                hashed_entry_eq, &entries[0]) == NULL);
+
+    shared_count = 0;
+    for (void *e = dshmap_find(&st, shared_hash); e;
+         e = dshmap_find_next(&st, shared_hash, e)) {
+        assert(e == &entries[0] || e == &entries[2]);
+        shared_count++;
+    }
+    assert(shared_count == 2);
+
+    DSHMAP_FOR_EACH(entry, &st) {
+        struct hashed_entry *e = entry;
+        assert(e >= entries && e < entries + n);
+        seen[(size_t)(e - entries)] = true;
+    }
+    for (size_t i = 0; i <= threshold; i++) {
+        assert(seen[i] == (i != 1 && i != threshold));
+    }
+
+    dshmap_clear(&st);
+    assert(dshmap_size(&st) == 0);
+    assert(dshmap_is_empty(&st));
+    DSHMAP_FOR_EACH(entry, &st) {
+        (void)entry;
+        assert(0 && "cleared promoted table yielded an entry");
+    }
+    for (size_t i = 0; i <= threshold; i++) {
+        assert(dshmap_find(&st, entries[i].hash) == NULL);
+    }
+
+    dshmap_insert(&st, &entries[threshold + 1],
+                  entries[threshold + 1].hash);
+    dshmap_insert(&st, &entries[threshold + 2],
+                  entries[threshold + 2].hash);
+    assert(!st.dense);
+    assert(dshmap_size(&st) == 2);
+    assert(dshmap_find(&st, entries[threshold + 1].hash) ==
+           &entries[threshold + 1]);
+    assert(dshmap_find(&st, entries[threshold + 2].hash) ==
+           &entries[threshold + 2]);
+
+    free(seen);
+    free(entries);
+    dshmap_destroy(&st);
+}
+
+static void
 test_reserve_above_dense_threshold_uses_swiss(void)
 {
     size_t threshold = DSHMAP_DENSE_THRESHOLD;
@@ -1465,6 +1593,7 @@ main(void)
     RUN_TEST(test_dense_hash_storage_policy);
     RUN_TEST(test_dense_remove_backshifts_cluster);
     RUN_TEST(test_dense_promotes_to_swiss_at_threshold);
+    RUN_TEST(test_dense_to_swiss_post_promotion_operations);
     RUN_TEST(test_reserve_above_dense_threshold_uses_swiss);
     RUN_TEST(test_swiss_hash_storage_policy);
     RUN_TEST(test_remove);

@@ -7,6 +7,8 @@ ASANFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
 test: tests/test.c tests/test_oom.c bench/bench.c dshmap.h
 	$(CC) $(CFLAGS) -o tests/test tests/test.c
 	./tests/test
+	$(CC) $(CFLAGS) -DDSHMAP_DENSE_THRESHOLD=16 -o tests/test-small-threshold tests/test.c
+	./tests/test-small-threshold
 	$(CC) $(CFLAGS) -o tests/test-oom tests/test_oom.c
 	./tests/test-oom
 	$(CC) $(CFLAGS) -o bench/bench bench/bench.c
@@ -18,6 +20,8 @@ test: tests/test.c tests/test_oom.c bench/bench.c dshmap.h
 test-asan: tests/test.c tests/test_oom.c dshmap.h
 	$(CC) $(CFLAGS) $(ASANFLAGS) -o tests/test-asan tests/test.c
 	./tests/test-asan
+	$(CC) $(CFLAGS) $(ASANFLAGS) -DDSHMAP_DENSE_THRESHOLD=16 -o tests/test-small-threshold-asan tests/test.c
+	./tests/test-small-threshold-asan
 	$(CC) $(CFLAGS) $(ASANFLAGS) -o tests/test-oom-asan tests/test_oom.c
 	./tests/test-oom-asan
 
@@ -32,5 +36,5 @@ coverage: tests/test.c dshmap.h
 	@echo "Coverage report: dshmap.h.gcov"
 
 clean:
-	rm -f tests/test tests/test-asan tests/test-oom tests/test-oom-asan tests/test-cov bench/bench
+	rm -f tests/test tests/test-asan tests/test-small-threshold tests/test-small-threshold-asan tests/test-oom tests/test-oom-asan tests/test-cov bench/bench
 	rm -f tests/*.gcno tests/*.gcda *.gcov
