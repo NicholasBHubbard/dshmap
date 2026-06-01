@@ -115,6 +115,7 @@ enum {
 };
 
 static size_t counted_hash_calls;
+static size_t macro_hash_calls;
 static uint64_t model_rng_state;
 
 static bool
@@ -138,6 +139,13 @@ hashed_entry_hash(const void *entry)
 {
     const struct hashed_entry *e = entry;
     return e->hash;
+}
+
+static dshmap_hash_t
+macro_hash_arg(dshmap_hash_t hash)
+{
+    macro_hash_calls++;
+    return hash;
 }
 
 static bool
@@ -1528,6 +1536,66 @@ test_find_next_filters_same_h2(void)
 }
 
 static void
+test_for_each_with_hash(void)
+{
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+
+    dshmap_hash_t target_hash = 0x2A;
+    struct hashed_entry a = { .key = 1, .hash = target_hash };
+    struct hashed_entry b = { .key = 2, .hash = target_hash };
+    struct hashed_entry c = { .key = 3, .hash = target_hash };
+    struct hashed_entry noise1 = { .key = 4, .hash = 0xAA };
+    struct hashed_entry noise2 = { .key = 5, .hash = 0x12A };
+
+    dshmap_insert(&map, &noise1, noise1.hash);
+    dshmap_insert(&map, &a, a.hash);
+    dshmap_insert(&map, &noise2, noise2.hash);
+    dshmap_insert(&map, &b, b.hash);
+    dshmap_insert(&map, &c, c.hash);
+
+    macro_hash_calls = 0;
+    bool found_a = false, found_b = false, found_c = false;
+    size_t count = 0;
+    DSHMAP_FOR_EACH_WITH_HASH(e, &map, macro_hash_arg(target_hash)) {
+        count++;
+        if (e == &a) found_a = true;
+        else if (e == &b) found_b = true;
+        else if (e == &c) found_c = true;
+        else assert(0 && "FOR_EACH_WITH_HASH returned same-H2 noise");
+    }
+    assert(count == 3);
+    assert(found_a && found_b && found_c);
+    assert(macro_hash_calls == 1);
+
+    macro_hash_calls = 0;
+    DSHMAP_FOR_EACH_WITH_HASH(e, &map, macro_hash_arg(0x1234)) {
+        (void)e;
+        assert(0 && "FOR_EACH_WITH_HASH returned missing hash");
+    }
+    assert(macro_hash_calls == 1);
+
+#if DSHMAP_DENSE_THRESHOLD != 0
+    dshmap_reserve(&map, DSHMAP_DENSE_THRESHOLD + 1);
+#endif
+    assert(!map.dense);
+
+    count = 0;
+    found_a = found_b = found_c = false;
+    DSHMAP_FOR_EACH_WITH_HASH(e, &map, target_hash) {
+        count++;
+        if (e == &a) found_a = true;
+        else if (e == &b) found_b = true;
+        else if (e == &c) found_c = true;
+        else assert(0 && "promoted FOR_EACH_WITH_HASH returned same-H2 noise");
+    }
+    assert(count == 3);
+    assert(found_a && found_b && found_c);
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_randomized_reference_model(void)
 {
     dshmap map;
@@ -1682,6 +1750,7 @@ main(void)
     RUN_TEST(test_reuse_tombstone_at_boundary);
     RUN_TEST(test_find_next_no_duplicates);
     RUN_TEST(test_find_next_filters_same_h2);
+    RUN_TEST(test_for_each_with_hash);
     RUN_TEST(test_randomized_reference_model);
     RUN_TEST(test_mixed_operations);
 

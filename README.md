@@ -68,6 +68,7 @@ Full documentation is in `dshmap.h`.
 | `dshmap_find_key_next` | Continue a key-aware lookup through duplicate logical keys |
 | `dshmap_remove` | Remove an entry by pointer |
 | `DSHMAP_FOR_EACH` | Iterate all entries |
+| `DSHMAP_FOR_EACH_WITH_HASH` | Iterate entries with a matching full hash |
 
 `NULL` entries are not supported. `dshmap` uses `NULL` as the lookup miss result
 and as an iteration sentinel.

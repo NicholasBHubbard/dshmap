@@ -386,6 +386,28 @@ dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash);
     for (void *var = (map)->slots[dshmap__slot_pos(var##_g_, dshmap__match_slot(var##_o_))]; \
          var; var = NULL)
 
+/* DSHMAP_FOR_EACH_WITH_HASH - Iterate over entries with a full hash.
+ *
+ * 'var' is declared as void * in the loop scope. Visits each entry whose
+ * full hash equals 'hash'. The hash expression is evaluated once. The
+ * 'map' argument is evaluated more than once, so pass a simple table
+ * pointer with no side effects. Iteration order is arbitrary and not
+ * related to insertion order. Do not insert or remove entries during
+ * iteration.
+ *
+ *     DSHMAP_FOR_EACH_WITH_HASH(entry, &map, hash) {
+ *         process(entry);
+ *     }
+ */
+#define DSHMAP_FOR_EACH_WITH_HASH(var, map, hash) \
+    for (bool var##_once_ = true; var##_once_; ) \
+    for (dshmap_hash_t var##_hash_ = (hash); \
+         var##_once_; \
+         var##_once_ = false) \
+    for (void *var = dshmap_find((map), var##_hash_); \
+         var; \
+         var = dshmap_find_next((map), var##_hash_, var))
+
 /* ===========================================================================
  *                                INTERNAL
  * =========================================================================== */
