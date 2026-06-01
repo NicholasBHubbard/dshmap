@@ -57,16 +57,16 @@ Full documentation is in `dshmap.h`.
 |---|---|
 | `dshmap_init` | Initialize a table |
 | `dshmap_destroy` | Free table memory |
-| `dshmap_size` | Number of entries |
-| `dshmap_is_empty` | Check if empty |
 | `dshmap_clear` | Remove all entries, keep capacity |
 | `dshmap_reserve` | Pre-allocate capacity |
+| `dshmap_size` | Number of entries |
+| `dshmap_is_empty` | Check if empty |
 | `dshmap_insert` | Insert a non-`NULL` entry; inserting the same entry pointer twice without removing it first is unsupported |
-| `dshmap_remove` | Remove an entry by pointer |
 | `dshmap_find` | Look up by hash; use `dshmap_find_key` when key equality matters |
+| `dshmap_find_next` | Continue a lookup through distinct entries with the same hash |
 | `dshmap_find_key` | Look up by hash and key equality; key-aware form of `dshmap_find` |
 | `dshmap_find_key_next` | Continue a key-aware lookup through duplicate logical keys |
-| `dshmap_find_next` | Continue a lookup through distinct entries with the same hash |
+| `dshmap_remove` | Remove an entry by pointer |
 | `DSHMAP_FOR_EACH` | Iterate all entries |
 
 `NULL` entries are not supported. `dshmap` uses `NULL` as the lookup miss result

@@ -210,24 +210,6 @@ dshmap_init(dshmap *map, dshmap_hash_fn hash_fn);
 static inline void
 dshmap_destroy(dshmap *map);
 
-/* dshmap_size - Return the number of entries in the table.
- *
- *     if (dshmap_size(&map) > 1000) {
- *         // table is large
- *     }
- */
-static inline size_t
-dshmap_size(const dshmap *map);
-
-/* dshmap_is_empty - Return true if the table contains no entries.
- *
- *     if (dshmap_is_empty(&map)) {
- *         printf("nothing to process\n");
- *     }
- */
-static inline bool
-dshmap_is_empty(const dshmap *map);
-
 /* dshmap_clear - Mark all slots as empty.
  *
  * Entry pointers are discarded but not freed; the caller owns those.
@@ -257,6 +239,24 @@ dshmap_clear(dshmap *map);
 static inline void
 dshmap_reserve(dshmap *map, size_t count);
 
+/* dshmap_size - Return the number of entries in the table.
+ *
+ *     if (dshmap_size(&map) > 1000) {
+ *         // table is large
+ *     }
+ */
+static inline size_t
+dshmap_size(const dshmap *map);
+
+/* dshmap_is_empty - Return true if the table contains no entries.
+ *
+ *     if (dshmap_is_empty(&map)) {
+ *         printf("nothing to process\n");
+ *     }
+ */
+static inline bool
+dshmap_is_empty(const dshmap *map);
+
 /* dshmap_insert - Insert an entry into the table.
  *
  * The caller must provide a precomputed full hash for entry. If dshmap
@@ -274,19 +274,6 @@ dshmap_reserve(dshmap *map, size_t count);
 static inline void
 dshmap_insert(dshmap *map, void *entry, dshmap_hash_t hash);
 
-/* dshmap_remove - Remove an entry from the table.
- *
- * Removes by pointer identity, not by hash equality. The caller must
- * pass the exact pointer that was inserted and the same full hash used
- * for insertion. No-op if the entry is not found. Does not free the
- * entry; the caller owns it.
- *
- *     dshmap_remove(&map, obj, my_hash(obj));
- *     free(obj);
- */
-static inline void
-dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash);
-
 /* dshmap_find - Look up an entry by hash.
  *
  * Returns the first entry whose hash matches, or NULL if none. This is
@@ -302,6 +289,21 @@ dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash);
  */
 static inline void *
 dshmap_find(const dshmap *map, dshmap_hash_t hash);
+
+/* dshmap_find_next - Continue a lookup after dshmap_find().
+ *
+ * Returns the next entry with the same hash after 'prev', or NULL if
+ * there are no more. 'prev' must be a pointer previously returned by
+ * dshmap_find() or dshmap_find_next() for the same hash. For key-aware
+ * lookup, prefer dshmap_find_key() and dshmap_find_key_next().
+ *
+ *     dshmap_hash_t h = my_hash(key);
+ *     for (void *e = dshmap_find(&map, h); e; e = dshmap_find_next(&map, h, e)) {
+ *         process(e);
+ *     }
+ */
+static inline void *
+dshmap_find_next(const dshmap *map, dshmap_hash_t hash, const void *prev);
 
 /* dshmap_find_key - Look up an entry by hash and key equality.
  *
@@ -346,20 +348,18 @@ static inline void *
 dshmap_find_key_next(const dshmap *map, dshmap_hash_t hash, const void *key,
                     dshmap_key_eq_fn eq_fn, const void *prev);
 
-/* dshmap_find_next - Continue a lookup after dshmap_find().
+/* dshmap_remove - Remove an entry from the table.
  *
- * Returns the next entry with the same hash after 'prev', or NULL if
- * there are no more. 'prev' must be a pointer previously returned by
- * dshmap_find() or dshmap_find_next() for the same hash. For key-aware
- * lookup, prefer dshmap_find_key() and dshmap_find_key_next().
+ * Removes by pointer identity, not by hash equality. The caller must
+ * pass the exact pointer that was inserted and the same full hash used
+ * for insertion. No-op if the entry is not found. Does not free the
+ * entry; the caller owns it.
  *
- *     dshmap_hash_t h = my_hash(key);
- *     for (void *e = dshmap_find(&map, h); e; e = dshmap_find_next(&map, h, e)) {
- *         process(e);
- *     }
+ *     dshmap_remove(&map, obj, my_hash(obj));
+ *     free(obj);
  */
-static inline void *
-dshmap_find_next(const dshmap *map, dshmap_hash_t hash, const void *prev);
+static inline void
+dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash);
 
 /* DSHMAP_FOR_EACH - Iterate over all entries in the table.
  *
@@ -895,18 +895,6 @@ dshmap_destroy(dshmap *map)
     dshmap_init(map, fn);
 }
 
-static inline size_t
-dshmap_size(const dshmap *map)
-{
-    return map->size;
-}
-
-static inline bool
-dshmap_is_empty(const dshmap *map)
-{
-    return map->size == 0;
-}
-
 static inline void
 dshmap_clear(dshmap *map)
 {
@@ -966,6 +954,18 @@ dshmap_reserve(dshmap *map, size_t count)
     }
 }
 
+static inline size_t
+dshmap_size(const dshmap *map)
+{
+    return map->size;
+}
+
+static inline bool
+dshmap_is_empty(const dshmap *map)
+{
+    return map->size == 0;
+}
+
 static inline void
 dshmap_insert(dshmap *map, void *entry, dshmap_hash_t hash)
 {
@@ -991,50 +991,6 @@ dshmap_insert(dshmap *map, void *entry, dshmap_hash_t hash)
     }
 }
 
-static inline void
-dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash)
-{
-    if (dshmap__is_dense(map)) {
-        size_t mask = dshmap__dense_mask(map);
-        size_t pos = hash & mask;
-        while (map->ctrl[pos] != DSHMAP__EMPTY) {
-            if (dshmap__slot_hash(map, pos) == hash &&
-                map->slots[pos] == entry) {
-                dshmap__dense_erase_at(map, pos);
-                return;
-            }
-            pos = (pos + 1) & mask;
-        }
-        return;
-    } else {
-        uint8_t h2 = dshmap__h2(hash);
-        DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
-            uint64_t match = dshmap__ctrl_match(ctrl, h2);
-            while (match) {
-                size_t pos = dshmap__slot_pos(index,
-                                              dshmap__ctrl_next_match(&match));
-                if ((map->hashes == NULL || map->hashes[pos] == hash) &&
-                    map->slots[pos] == entry) {
-                    uint64_t empty = dshmap__group_has_empty(ctrl);
-                    map->ctrl[pos] = empty ? DSHMAP__EMPTY : DSHMAP__DELETED;
-                    if (map->hashes != NULL) {
-                        map->hashes[pos] = 0;
-                    }
-                    map->slots[pos] = NULL;
-                    map->size--;
-                    if (empty) {
-                        map->growth_left++;
-                    }
-                    return;
-                }
-            }
-            if (dshmap__group_has_empty(ctrl)) {
-                return;
-            }
-        }
-    }
-}
-
 static inline void *
 dshmap_find(const dshmap *map, dshmap_hash_t hash)
 {
@@ -1055,6 +1011,51 @@ dshmap_find(const dshmap *map, dshmap_hash_t hash)
             while (match) {
                 size_t pos = dshmap__slot_pos(index,
                                               dshmap__ctrl_next_match(&match));
+                if (dshmap__slot_hash(map, pos) == hash) {
+                    return map->slots[pos];
+                }
+            }
+
+            if (dshmap__group_has_empty(ctrl)) {
+                return NULL;
+            }
+        }
+        return NULL;
+    }
+}
+
+static inline void *
+dshmap_find_next(const dshmap *map, dshmap_hash_t hash, const void *prev)
+{
+    if (dshmap__is_dense(map)) {
+        bool found_prev = false;
+        size_t mask = dshmap__dense_mask(map);
+        size_t pos = hash & mask;
+        while (map->ctrl[pos] != DSHMAP__EMPTY) {
+            if (!found_prev) {
+                if (map->slots[pos] == prev) {
+                    found_prev = true;
+                }
+            } else if (dshmap__slot_hash(map, pos) == hash) {
+                return map->slots[pos];
+            }
+            pos = (pos + 1) & mask;
+        }
+        return NULL;
+    } else {
+        uint8_t h2 = dshmap__h2(hash);
+        bool found_prev = false;
+        DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
+            uint64_t match = dshmap__ctrl_match(ctrl, h2);
+            while (match) {
+                size_t pos = dshmap__slot_pos(index,
+                                              dshmap__ctrl_next_match(&match));
+                if (!found_prev) {
+                    if (map->slots[pos] == prev) {
+                        found_prev = true;
+                    }
+                    continue;
+                }
                 if (dshmap__slot_hash(map, pos) == hash) {
                     return map->slots[pos];
                 }
@@ -1156,48 +1157,47 @@ dshmap_find_key_next(const dshmap *map, dshmap_hash_t hash, const void *key,
     }
 }
 
-static inline void *
-dshmap_find_next(const dshmap *map, dshmap_hash_t hash, const void *prev)
+static inline void
+dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash)
 {
     if (dshmap__is_dense(map)) {
-        bool found_prev = false;
         size_t mask = dshmap__dense_mask(map);
         size_t pos = hash & mask;
         while (map->ctrl[pos] != DSHMAP__EMPTY) {
-            if (!found_prev) {
-                if (map->slots[pos] == prev) {
-                    found_prev = true;
-                }
-            } else if (dshmap__slot_hash(map, pos) == hash) {
-                return map->slots[pos];
+            if (dshmap__slot_hash(map, pos) == hash &&
+                map->slots[pos] == entry) {
+                dshmap__dense_erase_at(map, pos);
+                return;
             }
             pos = (pos + 1) & mask;
         }
-        return NULL;
+        return;
     } else {
         uint8_t h2 = dshmap__h2(hash);
-        bool found_prev = false;
         DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
             uint64_t match = dshmap__ctrl_match(ctrl, h2);
             while (match) {
                 size_t pos = dshmap__slot_pos(index,
                                               dshmap__ctrl_next_match(&match));
-                if (!found_prev) {
-                    if (map->slots[pos] == prev) {
-                        found_prev = true;
+                if ((map->hashes == NULL || map->hashes[pos] == hash) &&
+                    map->slots[pos] == entry) {
+                    uint64_t empty = dshmap__group_has_empty(ctrl);
+                    map->ctrl[pos] = empty ? DSHMAP__EMPTY : DSHMAP__DELETED;
+                    if (map->hashes != NULL) {
+                        map->hashes[pos] = 0;
                     }
-                    continue;
-                }
-                if (dshmap__slot_hash(map, pos) == hash) {
-                    return map->slots[pos];
+                    map->slots[pos] = NULL;
+                    map->size--;
+                    if (empty) {
+                        map->growth_left++;
+                    }
+                    return;
                 }
             }
-
             if (dshmap__group_has_empty(ctrl)) {
-                return NULL;
+                return;
             }
         }
-        return NULL;
     }
 }
 
