@@ -84,6 +84,11 @@ struct counted_entry {
     swtab_hash_t hash;
 };
 
+struct hashed_entry {
+    int key;
+    swtab_hash_t hash;
+};
+
 static size_t counted_hash_calls;
 
 static bool
@@ -100,6 +105,21 @@ counted_entry_hash(const void *entry)
     const struct counted_entry *e = entry;
     counted_hash_calls++;
     return e->hash;
+}
+
+static swtab_hash_t
+hashed_entry_hash(const void *entry)
+{
+    const struct hashed_entry *e = entry;
+    return e->hash;
+}
+
+static bool
+hashed_entry_eq(const void *entry, const void *key)
+{
+    const struct hashed_entry *e = entry;
+    const int *k = key;
+    return e->key == *k;
 }
 
 static bool
@@ -142,6 +162,129 @@ test_duplicate_hashes(void)
     assert(found_count == 3);
     assert(last != NULL);
     assert(swtab_find_next(&st, hash, last) == NULL);
+
+    swtab_destroy(&st);
+}
+
+static void
+test_same_h2_different_full_hashes(void)
+{
+    swtab st;
+    swtab_init(&st, hashed_entry_hash);
+
+    struct hashed_entry a = { .key = 1, .hash = 0x05 };
+    struct hashed_entry b = { .key = 2, .hash = 0x85 };
+    struct hashed_entry c = { .key = 3, .hash = 0x105 };
+
+    swtab_insert(&st, &a, a.hash);
+    swtab_insert(&st, &b, b.hash);
+    swtab_insert(&st, &c, c.hash);
+
+    assert(swtab_find(&st, a.hash) == &a);
+    assert(swtab_find(&st, b.hash) == &b);
+    assert(swtab_find(&st, c.hash) == &c);
+    assert(swtab_find(&st, 0x185) == NULL);
+
+    swtab_destroy(&st);
+}
+
+static void
+test_tombstone_preserves_probe_chain(void)
+{
+    swtab st;
+    swtab_init(&st, hashed_entry_hash);
+    swtab_reserve(&st, 14);
+    assert(st.group_mask == 1);
+
+    struct hashed_entry entries[9];
+    for (size_t i = 0; i < 9; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = ((swtab_hash_t)(i * 2) << 7) | (i + 1);
+        swtab_insert(&st, &entries[i], entries[i].hash);
+    }
+    assert(swtab_size(&st) == 9);
+
+    swtab_remove(&st, &entries[3], entries[3].hash);
+    assert(swtab_find(&st, entries[3].hash) == NULL);
+    assert(swtab_find(&st, entries[8].hash) == &entries[8]);
+
+    for (size_t i = 0; i < 9; i++) {
+        if (i != 3) {
+            assert(swtab_find(&st, entries[i].hash) == &entries[i]);
+        }
+    }
+
+    swtab_destroy(&st);
+}
+
+static void
+test_probe_wraparound(void)
+{
+    swtab st;
+    swtab_init(&st, hashed_entry_hash);
+    swtab_reserve(&st, 28);
+    assert(st.group_mask == 3);
+
+    struct hashed_entry entries[9];
+    for (size_t i = 0; i < 9; i++) {
+        swtab_hash_t h1 = 3 + i * 4;
+        entries[i].key = (int)i;
+        entries[i].hash = (h1 << 7) | (20 + i);
+        swtab_insert(&st, &entries[i], entries[i].hash);
+    }
+    assert(swtab_size(&st) == 9);
+
+    for (size_t i = 0; i < 9; i++) {
+        assert(swtab_find(&st, entries[i].hash) == &entries[i]);
+    }
+    assert(swtab_find(&st, ((swtab_hash_t)43 << 7) | 60) == NULL);
+
+    swtab_remove(&st, &entries[0], entries[0].hash);
+    assert(swtab_find(&st, entries[0].hash) == NULL);
+    assert(swtab_find(&st, entries[8].hash) == &entries[8]);
+
+    swtab_remove(&st, &entries[8], entries[8].hash);
+    assert(swtab_find(&st, entries[8].hash) == NULL);
+    assert(swtab_size(&st) == 7);
+
+    swtab_destroy(&st);
+}
+
+static void
+test_reuse_deep_tombstone_before_grow(void)
+{
+    swtab st;
+    swtab_init(&st, hashed_entry_hash);
+    swtab_reserve(&st, 28);
+    assert(st.group_mask == 3);
+
+    struct hashed_entry entries[29];
+    for (size_t i = 0; i < 28; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = ((swtab_hash_t)(i * 4) << 7) | (i + 1);
+        swtab_insert(&st, &entries[i], entries[i].hash);
+    }
+    assert(swtab_size(&st) == 28);
+    assert(st.growth_left == 0);
+
+    swtab_remove(&st, &entries[10], entries[10].hash);
+    assert(swtab_find(&st, entries[10].hash) == NULL);
+    assert(st.growth_left == 0);
+
+    size_t mask = st.group_mask;
+    entries[28].key = 28;
+    entries[28].hash = ((swtab_hash_t)(100 * 4) << 7) | 90;
+    swtab_insert(&st, &entries[28], entries[28].hash);
+
+    assert(st.group_mask == mask);
+    assert(swtab_size(&st) == 28);
+    assert(swtab_find(&st, entries[28].hash) == &entries[28]);
+
+    for (size_t i = 0; i < 28; i++) {
+        if (i != 10) {
+            assert(swtab_find(&st, entries[i].hash) == &entries[i]);
+        }
+    }
 
     swtab_destroy(&st);
 }
@@ -228,6 +371,42 @@ test_find_key_does_not_rehash_candidates(void)
 }
 
 static void
+test_find_key_skips_same_h2_noise(void)
+{
+    swtab st;
+    swtab_init(&st, hashed_entry_hash);
+
+    swtab_hash_t target_hash = 0x55;
+    struct hashed_entry noise1 = { .key = 1, .hash = 0xD5 };
+    struct hashed_entry a = { .key = 7, .hash = target_hash };
+    struct hashed_entry noise2 = { .key = 2, .hash = 0x155 };
+    struct hashed_entry b = { .key = 7, .hash = target_hash };
+    struct hashed_entry noise3 = { .key = 3, .hash = 0x1D5 };
+
+    swtab_insert(&st, &noise1, noise1.hash);
+    swtab_insert(&st, &a, a.hash);
+    swtab_insert(&st, &noise2, noise2.hash);
+    swtab_insert(&st, &b, b.hash);
+    swtab_insert(&st, &noise3, noise3.hash);
+
+    int key = 7;
+    void *first = swtab_find_key(&st, target_hash, &key, hashed_entry_eq);
+    void *second = swtab_find_key_next(&st, target_hash, &key,
+                                       hashed_entry_eq, first);
+    void *third = swtab_find_key_next(&st, target_hash, &key,
+                                      hashed_entry_eq, second);
+
+    assert((first == &a && second == &b) ||
+           (first == &b && second == &a));
+    assert(third == NULL);
+
+    key = 99;
+    assert(swtab_find_key(&st, target_hash, &key, hashed_entry_eq) == NULL);
+
+    swtab_destroy(&st);
+}
+
+static void
 test_remove(void)
 {
     swtab st;
@@ -288,6 +467,56 @@ test_clear(void)
 }
 
 static void
+test_clear_after_tombstone_heavy_table(void)
+{
+    swtab st;
+    swtab_init(&st, hashed_entry_hash);
+    swtab_reserve(&st, 28);
+
+    struct hashed_entry entries[28];
+    for (size_t i = 0; i < 28; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = ((swtab_hash_t)(i * 4) << 7) | (i + 1);
+        swtab_insert(&st, &entries[i], entries[i].hash);
+    }
+    assert(swtab_size(&st) == 28);
+
+    for (size_t i = 0; i < 20; i++) {
+        swtab_remove(&st, &entries[i], entries[i].hash);
+    }
+    assert(swtab_size(&st) == 8);
+
+    swtab_clear(&st);
+    assert(swtab_size(&st) == 0);
+    assert(swtab_is_empty(&st));
+
+    size_t count = 0;
+    SWTAB_FOR_EACH(entry, &st) {
+        (void)entry;
+        count++;
+    }
+    assert(count == 0);
+
+    for (size_t i = 0; i < 28; i++) {
+        assert(swtab_find(&st, entries[i].hash) == NULL);
+    }
+
+    struct hashed_entry fresh[5];
+    for (size_t i = 0; i < 5; i++) {
+        fresh[i].key = (int)i + 100;
+        fresh[i].hash = ((swtab_hash_t)(i * 4) << 7) | (40 + i);
+        swtab_insert(&st, &fresh[i], fresh[i].hash);
+    }
+    assert(swtab_size(&st) == 5);
+
+    for (size_t i = 0; i < 5; i++) {
+        assert(swtab_find(&st, fresh[i].hash) == &fresh[i]);
+    }
+
+    swtab_destroy(&st);
+}
+
+static void
 test_reserve(void)
 {
     swtab st;
@@ -325,6 +554,44 @@ test_reserve_noop(void)
 
     swtab_reserve(&st, 3);
     assert(st.group_mask == mask);
+
+    swtab_destroy(&st);
+}
+
+static void
+test_reserve_after_tombstone_churn(void)
+{
+    swtab st;
+    swtab_init(&st, hashed_entry_hash);
+    swtab_reserve(&st, 28);
+
+    struct hashed_entry entries[28];
+    for (size_t i = 0; i < 28; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = ((swtab_hash_t)(i * 4) << 7) | (i + 1);
+        swtab_insert(&st, &entries[i], entries[i].hash);
+    }
+    assert(swtab_size(&st) == 28);
+
+    size_t removed = 0;
+    for (size_t i = 0; i < 28; i += 3) {
+        swtab_remove(&st, &entries[i], entries[i].hash);
+        removed++;
+    }
+    assert(swtab_size(&st) == 28 - removed);
+
+    size_t old_mask = st.group_mask;
+    swtab_reserve(&st, 100);
+    assert(st.group_mask > old_mask);
+    assert(swtab_size(&st) == 28 - removed);
+
+    for (size_t i = 0; i < 28; i++) {
+        if (i % 3 == 0) {
+            assert(swtab_find(&st, entries[i].hash) == NULL);
+        } else {
+            assert(swtab_find(&st, entries[i].hash) == &entries[i]);
+        }
+    }
 
     swtab_destroy(&st);
 }
@@ -655,6 +922,45 @@ test_find_next_no_duplicates(void)
 }
 
 static void
+test_find_next_filters_same_h2(void)
+{
+    swtab st;
+    swtab_init(&st, hashed_entry_hash);
+
+    swtab_hash_t target_hash = 0x2A;
+    struct hashed_entry a = { .key = 1, .hash = target_hash };
+    struct hashed_entry b = { .key = 2, .hash = target_hash };
+    struct hashed_entry c = { .key = 3, .hash = target_hash };
+    struct hashed_entry noise1 = { .key = 4, .hash = 0xAA };
+    struct hashed_entry noise2 = { .key = 5, .hash = 0x12A };
+    struct hashed_entry noise3 = { .key = 6, .hash = 0x1AA };
+
+    swtab_insert(&st, &noise1, noise1.hash);
+    swtab_insert(&st, &a, a.hash);
+    swtab_insert(&st, &noise2, noise2.hash);
+    swtab_insert(&st, &b, b.hash);
+    swtab_insert(&st, &noise3, noise3.hash);
+    swtab_insert(&st, &c, c.hash);
+
+    bool found_a = false, found_b = false, found_c = false;
+    size_t count = 0;
+    for (void *e = swtab_find(&st, target_hash);
+         e;
+         e = swtab_find_next(&st, target_hash, e)) {
+        count++;
+        if (e == &a) found_a = true;
+        else if (e == &b) found_b = true;
+        else if (e == &c) found_c = true;
+        else assert(0 && "find_next returned same-H2 noise");
+    }
+
+    assert(count == 3);
+    assert(found_a && found_b && found_c);
+
+    swtab_destroy(&st);
+}
+
+static void
 test_mixed_operations(void)
 {
     swtab st;
@@ -690,13 +996,20 @@ main(void)
     RUN_TEST(test_insert_find);
     RUN_TEST(test_insert_multiple);
     RUN_TEST(test_duplicate_hashes);
+    RUN_TEST(test_same_h2_different_full_hashes);
+    RUN_TEST(test_tombstone_preserves_probe_chain);
+    RUN_TEST(test_probe_wraparound);
+    RUN_TEST(test_reuse_deep_tombstone_before_grow);
     RUN_TEST(test_find_key_resolves_hash_collision);
     RUN_TEST(test_find_key_next);
     RUN_TEST(test_find_key_does_not_rehash_candidates);
+    RUN_TEST(test_find_key_skips_same_h2_noise);
     RUN_TEST(test_remove);
     RUN_TEST(test_clear);
+    RUN_TEST(test_clear_after_tombstone_heavy_table);
     RUN_TEST(test_reserve);
     RUN_TEST(test_reserve_noop);
+    RUN_TEST(test_reserve_after_tombstone_churn);
     RUN_TEST(test_growth);
     RUN_TEST(test_large_table);
     RUN_TEST(test_iteration);
@@ -712,6 +1025,7 @@ main(void)
     RUN_TEST(test_remove_empty_slot_restores_growth);
     RUN_TEST(test_reuse_tombstone_at_boundary);
     RUN_TEST(test_find_next_no_duplicates);
+    RUN_TEST(test_find_next_filters_same_h2);
     RUN_TEST(test_mixed_operations);
 
     printf("\nAll tests passed.\n");
