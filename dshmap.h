@@ -20,6 +20,11 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifdef __cplusplus
+extern "C" {
+}
+#endif
+
 /* ===========================================================================
  *                               PUBLIC API
  * =========================================================================== */
@@ -1222,5 +1227,9 @@ dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash)
         }
     }
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
