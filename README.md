@@ -34,18 +34,18 @@ static dshmap_hash_t entry_hash(const void *entry) {
 }
 
 int main(void) {
-    dshmap st;
-    dshmap_init(&st, entry_hash);
-    dshmap_reserve(&st, 1000000);
+    dshmap map;
+    dshmap_init(&map, entry_hash);
+    dshmap_reserve(&map, 1000000);
 
     for (uintptr_t i = 1; i <= 1000000; i++)
-        dshmap_insert(&st, (void *)i, i);
+        dshmap_insert(&map, (void *)i, i);
 
-    void *found = dshmap_find(&st, 500000);
+    void *found = dshmap_find(&map, 500000);
     printf("found key %ld in %zu entries\n",
-           (long)(uintptr_t)found, dshmap_size(&st));
+           (long)(uintptr_t)found, dshmap_size(&map));
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 ```
 

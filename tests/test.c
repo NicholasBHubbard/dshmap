@@ -13,15 +13,15 @@ dummy_hash(const void *entry)
 }
 
 static size_t
-fill_until_growth_left_zero(dshmap *st, size_t next)
+fill_until_growth_left_zero(dshmap *map, size_t next)
 {
     for (;;) {
-        size_t target = dshmap_size(st) + st->growth_left;
+        size_t target = dshmap_size(map) + map->growth_left;
         while (next <= target) {
-            dshmap_insert(st, (void *)next, dummy_hash((void *)next));
+            dshmap_insert(map, (void *)next, dummy_hash((void *)next));
             next++;
         }
-        if (st->growth_left == 0) {
+        if (map->growth_left == 0) {
             return next;
         }
     }
@@ -30,41 +30,41 @@ fill_until_growth_left_zero(dshmap *st, size_t next)
 static void
 test_lifecycle(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
-    assert(dshmap_size(&st) == 0);
-    assert(dshmap_is_empty(&st));
-    dshmap_destroy(&st);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+    assert(dshmap_size(&map) == 0);
+    assert(dshmap_is_empty(&map));
+    dshmap_destroy(&map);
 
-    dshmap_init(&st, dummy_hash);
-    assert(dshmap_size(&st) == 0);
-    assert(dshmap_is_empty(&st));
-    dshmap_destroy(&st);
+    dshmap_init(&map, dummy_hash);
+    assert(dshmap_size(&map) == 0);
+    assert(dshmap_is_empty(&map));
+    dshmap_destroy(&map);
 }
 
 static void
 test_insert_find(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     void *entry = (void *)42;
     dshmap_hash_t hash = dummy_hash(entry);
-    dshmap_insert(&st, entry, hash);
+    dshmap_insert(&map, entry, hash);
 
-    assert(dshmap_size(&st) == 1);
-    assert(!dshmap_is_empty(&st));
-    assert(dshmap_find(&st, hash) == entry);
-    assert(dshmap_find(&st, dummy_hash((void *)99)) == NULL);
+    assert(dshmap_size(&map) == 1);
+    assert(!dshmap_is_empty(&map));
+    assert(dshmap_find(&map, hash) == entry);
+    assert(dshmap_find(&map, dummy_hash((void *)99)) == NULL);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_insert_multiple(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     void *entries[] = {
         (void *)10, (void *)20, (void *)30, (void *)40, (void *)50,
@@ -72,15 +72,15 @@ test_insert_multiple(void)
     size_t n = sizeof(entries) / sizeof(entries[0]);
 
     for (size_t i = 0; i < n; i++) {
-        dshmap_insert(&st, entries[i], dummy_hash(entries[i]));
+        dshmap_insert(&map, entries[i], dummy_hash(entries[i]));
     }
 
-    assert(dshmap_size(&st) == n);
+    assert(dshmap_size(&map) == n);
     for (size_t i = 0; i < n; i++) {
-        assert(dshmap_find(&st, dummy_hash(entries[i])) == entries[i]);
+        assert(dshmap_find(&map, dummy_hash(entries[i])) == entries[i]);
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static dshmap_hash_t
@@ -238,15 +238,15 @@ model_has_live_hash(const struct model_entry *entries, dshmap_hash_t hash)
 }
 
 static void
-model_check_hash(const dshmap *st, const struct model_entry *entries,
+model_check_hash(const dshmap *map, const struct model_entry *entries,
                  dshmap_hash_t hash)
 {
     bool seen[MODEL_CAP] = {0};
     size_t count = 0;
 
-    for (void *entry = dshmap_find(st, hash);
+    for (void *entry = dshmap_find(map, hash);
          entry;
-         entry = dshmap_find_next(st, hash, entry)) {
+         entry = dshmap_find_next(map, hash, entry)) {
         size_t idx = model_index(entries, entry);
         assert(idx < MODEL_CAP);
         assert(entries[idx].live);
@@ -265,16 +265,16 @@ model_check_hash(const dshmap *st, const struct model_entry *entries,
 }
 
 static void
-model_check_all(const dshmap *st, const struct model_entry *entries)
+model_check_all(const dshmap *map, const struct model_entry *entries)
 {
     bool seen[MODEL_CAP] = {0};
     size_t live = model_live_count(entries);
     size_t iter_count = 0;
 
-    assert(dshmap_size(st) == live);
-    assert(dshmap_is_empty(st) == (live == 0));
+    assert(dshmap_size(map) == live);
+    assert(dshmap_is_empty(map) == (live == 0));
 
-    DSHMAP_FOR_EACH(entry, st) {
+    DSHMAP_FOR_EACH(entry, map) {
         size_t idx = model_index(entries, entry);
         assert(idx < MODEL_CAP);
         assert(entries[idx].live);
@@ -288,18 +288,18 @@ model_check_all(const dshmap *st, const struct model_entry *entries)
         dshmap_hash_t hash = entries[i].entry.hash;
         if (entries[i].live) {
             int key = entries[i].entry.key;
-            void *found = dshmap_find(st, hash);
+            void *found = dshmap_find(map, hash);
             size_t idx = model_index(entries, found);
             assert(seen[i]);
             assert(idx < MODEL_CAP);
             assert(entries[idx].live);
             assert(entries[idx].entry.hash == hash);
-            assert(dshmap_find_key(st, hash, &key, hashed_entry_eq) ==
+            assert(dshmap_find_key(map, hash, &key, hashed_entry_eq) ==
                    &entries[i].entry);
-            assert(dshmap_find_key_next(st, hash, &key, hashed_entry_eq,
+            assert(dshmap_find_key_next(map, hash, &key, hashed_entry_eq,
                                        &entries[i].entry) == NULL);
         } else if (!model_has_live_hash(entries, hash)) {
-            assert(dshmap_find(st, hash) == NULL);
+            assert(dshmap_find(map, hash) == NULL);
         }
     }
 }
@@ -315,100 +315,100 @@ counted_entry_eq(const void *entry, const void *key)
 static void
 test_duplicate_hashes(void)
 {
-    dshmap st;
-    dshmap_init(&st, colliding_hash);
+    dshmap map;
+    dshmap_init(&map, colliding_hash);
 
     void *a = (void *)1;
     void *b = (void *)2;
     void *c = (void *)3;
     dshmap_hash_t hash = 42;
 
-    dshmap_insert(&st, a, hash);
-    dshmap_insert(&st, b, hash);
-    dshmap_insert(&st, c, hash);
-    assert(dshmap_size(&st) == 3);
+    dshmap_insert(&map, a, hash);
+    dshmap_insert(&map, b, hash);
+    dshmap_insert(&map, c, hash);
+    assert(dshmap_size(&map) == 3);
 
     bool found_a = false, found_b = false, found_c = false;
     size_t found_count = 0;
     void *last = NULL;
-    void *e = dshmap_find(&st, hash);
+    void *e = dshmap_find(&map, hash);
     while (e) {
         found_count++;
         last = e;
         if (e == a) found_a = true;
         else if (e == b) found_b = true;
         else if (e == c) found_c = true;
-        e = dshmap_find_next(&st, hash, e);
+        e = dshmap_find_next(&map, hash, e);
     }
     assert(found_a && found_b && found_c);
     assert(found_count == 3);
     assert(last != NULL);
-    assert(dshmap_find_next(&st, hash, last) == NULL);
+    assert(dshmap_find_next(&map, hash, last) == NULL);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_same_h2_different_full_hashes(void)
 {
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
 
     struct hashed_entry a = { .key = 1, .hash = 0x05 };
     struct hashed_entry b = { .key = 2, .hash = 0x85 };
     struct hashed_entry c = { .key = 3, .hash = 0x105 };
 
-    dshmap_insert(&st, &a, a.hash);
-    dshmap_insert(&st, &b, b.hash);
-    dshmap_insert(&st, &c, c.hash);
+    dshmap_insert(&map, &a, a.hash);
+    dshmap_insert(&map, &b, b.hash);
+    dshmap_insert(&map, &c, c.hash);
 
-    assert(dshmap_find(&st, a.hash) == &a);
-    assert(dshmap_find(&st, b.hash) == &b);
-    assert(dshmap_find(&st, c.hash) == &c);
-    assert(dshmap_find(&st, 0x185) == NULL);
+    assert(dshmap_find(&map, a.hash) == &a);
+    assert(dshmap_find(&map, b.hash) == &b);
+    assert(dshmap_find(&map, c.hash) == &c);
+    assert(dshmap_find(&map, 0x185) == NULL);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_tombstone_preserves_probe_chain(void)
 {
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
-    dshmap_reserve(&st, 14);
-    if (!st.dense) {
-        assert(st.group_mask == 1);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+    dshmap_reserve(&map, 14);
+    if (!map.dense) {
+        assert(map.group_mask == 1);
     }
 
     struct hashed_entry entries[9];
     for (size_t i = 0; i < 9; i++) {
         entries[i].key = (int)i;
         entries[i].hash = ((dshmap_hash_t)(i * 2) << 7) | (i + 1);
-        dshmap_insert(&st, &entries[i], entries[i].hash);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
     }
-    assert(dshmap_size(&st) == 9);
+    assert(dshmap_size(&map) == 9);
 
-    dshmap_remove(&st, &entries[3], entries[3].hash);
-    assert(dshmap_find(&st, entries[3].hash) == NULL);
-    assert(dshmap_find(&st, entries[8].hash) == &entries[8]);
+    dshmap_remove(&map, &entries[3], entries[3].hash);
+    assert(dshmap_find(&map, entries[3].hash) == NULL);
+    assert(dshmap_find(&map, entries[8].hash) == &entries[8]);
 
     for (size_t i = 0; i < 9; i++) {
         if (i != 3) {
-            assert(dshmap_find(&st, entries[i].hash) == &entries[i]);
+            assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
         }
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_probe_wraparound(void)
 {
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
-    dshmap_reserve(&st, 28);
-    if (!st.dense) {
-        assert(st.group_mask == 3);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+    dshmap_reserve(&map, 28);
+    if (!map.dense) {
+        assert(map.group_mask == 3);
     }
 
     struct hashed_entry entries[9];
@@ -416,157 +416,157 @@ test_probe_wraparound(void)
         dshmap_hash_t h1 = 3 + i * 4;
         entries[i].key = (int)i;
         entries[i].hash = (h1 << 7) | (20 + i);
-        dshmap_insert(&st, &entries[i], entries[i].hash);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
     }
-    assert(dshmap_size(&st) == 9);
+    assert(dshmap_size(&map) == 9);
 
     for (size_t i = 0; i < 9; i++) {
-        assert(dshmap_find(&st, entries[i].hash) == &entries[i]);
+        assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
     }
-    assert(dshmap_find(&st, ((dshmap_hash_t)43 << 7) | 60) == NULL);
+    assert(dshmap_find(&map, ((dshmap_hash_t)43 << 7) | 60) == NULL);
 
-    dshmap_remove(&st, &entries[0], entries[0].hash);
-    assert(dshmap_find(&st, entries[0].hash) == NULL);
-    assert(dshmap_find(&st, entries[8].hash) == &entries[8]);
+    dshmap_remove(&map, &entries[0], entries[0].hash);
+    assert(dshmap_find(&map, entries[0].hash) == NULL);
+    assert(dshmap_find(&map, entries[8].hash) == &entries[8]);
 
-    dshmap_remove(&st, &entries[8], entries[8].hash);
-    assert(dshmap_find(&st, entries[8].hash) == NULL);
-    assert(dshmap_size(&st) == 7);
+    dshmap_remove(&map, &entries[8], entries[8].hash);
+    assert(dshmap_find(&map, entries[8].hash) == NULL);
+    assert(dshmap_size(&map) == 7);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_reuse_deep_tombstone_before_grow(void)
 {
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
-    dshmap_reserve(&st, 28);
-    if (!st.dense) {
-        assert(st.group_mask == 3);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+    dshmap_reserve(&map, 28);
+    if (!map.dense) {
+        assert(map.group_mask == 3);
     }
 
     struct hashed_entry entries[29];
     for (size_t i = 0; i < 28; i++) {
         entries[i].key = (int)i;
         entries[i].hash = ((dshmap_hash_t)(i * 4) << 7) | (i + 1);
-        dshmap_insert(&st, &entries[i], entries[i].hash);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
     }
-    assert(dshmap_size(&st) == 28);
-    if (!st.dense) {
-        assert(st.growth_left == 0);
-    }
-
-    dshmap_remove(&st, &entries[10], entries[10].hash);
-    assert(dshmap_find(&st, entries[10].hash) == NULL);
-    if (!st.dense) {
-        assert(st.growth_left == 0);
+    assert(dshmap_size(&map) == 28);
+    if (!map.dense) {
+        assert(map.growth_left == 0);
     }
 
-    size_t mask = st.group_mask;
+    dshmap_remove(&map, &entries[10], entries[10].hash);
+    assert(dshmap_find(&map, entries[10].hash) == NULL);
+    if (!map.dense) {
+        assert(map.growth_left == 0);
+    }
+
+    size_t mask = map.group_mask;
     entries[28].key = 28;
     entries[28].hash = ((dshmap_hash_t)(100 * 4) << 7) | 90;
-    dshmap_insert(&st, &entries[28], entries[28].hash);
+    dshmap_insert(&map, &entries[28], entries[28].hash);
 
-    assert(st.group_mask == mask);
-    assert(dshmap_size(&st) == 28);
-    assert(dshmap_find(&st, entries[28].hash) == &entries[28]);
+    assert(map.group_mask == mask);
+    assert(dshmap_size(&map) == 28);
+    assert(dshmap_find(&map, entries[28].hash) == &entries[28]);
 
     for (size_t i = 0; i < 28; i++) {
         if (i != 10) {
-            assert(dshmap_find(&st, entries[i].hash) == &entries[i]);
+            assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
         }
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_find_key_resolves_hash_collision(void)
 {
-    dshmap st;
-    dshmap_init(&st, colliding_hash);
+    dshmap map;
+    dshmap_init(&map, colliding_hash);
 
     struct keyed_entry a = { .key = 1 };
     struct keyed_entry b = { .key = 2 };
     struct keyed_entry c = { .key = 3 };
     dshmap_hash_t hash = 42;
 
-    dshmap_insert(&st, &a, hash);
-    dshmap_insert(&st, &b, hash);
-    dshmap_insert(&st, &c, hash);
+    dshmap_insert(&map, &a, hash);
+    dshmap_insert(&map, &b, hash);
+    dshmap_insert(&map, &c, hash);
 
     int key = 2;
-    assert(dshmap_find_key(&st, hash, &key, keyed_entry_eq) == &b);
+    assert(dshmap_find_key(&map, hash, &key, keyed_entry_eq) == &b);
 
     key = 99;
-    assert(dshmap_find_key(&st, hash, &key, keyed_entry_eq) == NULL);
+    assert(dshmap_find_key(&map, hash, &key, keyed_entry_eq) == NULL);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_find_key_next(void)
 {
-    dshmap st;
-    dshmap_init(&st, colliding_hash);
+    dshmap map;
+    dshmap_init(&map, colliding_hash);
 
     struct keyed_entry a = { .key = 7 };
     struct keyed_entry b = { .key = 8 };
     struct keyed_entry c = { .key = 7 };
     dshmap_hash_t hash = 42;
 
-    dshmap_insert(&st, &a, hash);
-    dshmap_insert(&st, &b, hash);
-    dshmap_insert(&st, &c, hash);
+    dshmap_insert(&map, &a, hash);
+    dshmap_insert(&map, &b, hash);
+    dshmap_insert(&map, &c, hash);
 
     int key = 7;
-    void *first = dshmap_find_key(&st, hash, &key, keyed_entry_eq);
-    void *second = dshmap_find_key_next(&st, hash, &key, keyed_entry_eq, first);
-    void *third = dshmap_find_key_next(&st, hash, &key, keyed_entry_eq, second);
+    void *first = dshmap_find_key(&map, hash, &key, keyed_entry_eq);
+    void *second = dshmap_find_key_next(&map, hash, &key, keyed_entry_eq, first);
+    void *third = dshmap_find_key_next(&map, hash, &key, keyed_entry_eq, second);
 
     assert((first == &a && second == &c) ||
            (first == &c && second == &a));
     assert(third == NULL);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_find_key_does_not_rehash_candidates(void)
 {
-    dshmap st;
-    dshmap_init(&st, counted_entry_hash);
+    dshmap map;
+    dshmap_init(&map, counted_entry_hash);
 
     struct counted_entry a = { .key = 7, .hash = 42 };
     struct counted_entry b = { .key = 8, .hash = 42 };
     struct counted_entry c = { .key = 7, .hash = 42 };
     dshmap_hash_t hash = 42;
 
-    dshmap_insert(&st, &a, hash);
-    dshmap_insert(&st, &b, hash);
-    dshmap_insert(&st, &c, hash);
+    dshmap_insert(&map, &a, hash);
+    dshmap_insert(&map, &b, hash);
+    dshmap_insert(&map, &c, hash);
 
     counted_hash_calls = 0;
 
     int key = 7;
-    void *first = dshmap_find_key(&st, hash, &key, counted_entry_eq);
-    void *second = dshmap_find_key_next(&st, hash, &key, counted_entry_eq, first);
-    void *third = dshmap_find_key_next(&st, hash, &key, counted_entry_eq, second);
+    void *first = dshmap_find_key(&map, hash, &key, counted_entry_eq);
+    void *second = dshmap_find_key_next(&map, hash, &key, counted_entry_eq, first);
+    void *third = dshmap_find_key_next(&map, hash, &key, counted_entry_eq, second);
 
     assert((first == &a && second == &c) ||
            (first == &c && second == &a));
     assert(third == NULL);
     assert(counted_hash_calls == 0);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_find_key_skips_same_h2_noise(void)
 {
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
 
     dshmap_hash_t target_hash = 0x55;
     struct hashed_entry noise1 = { .key = 1, .hash = 0xD5 };
@@ -575,17 +575,17 @@ test_find_key_skips_same_h2_noise(void)
     struct hashed_entry b = { .key = 7, .hash = target_hash };
     struct hashed_entry noise3 = { .key = 3, .hash = 0x1D5 };
 
-    dshmap_insert(&st, &noise1, noise1.hash);
-    dshmap_insert(&st, &a, a.hash);
-    dshmap_insert(&st, &noise2, noise2.hash);
-    dshmap_insert(&st, &b, b.hash);
-    dshmap_insert(&st, &noise3, noise3.hash);
+    dshmap_insert(&map, &noise1, noise1.hash);
+    dshmap_insert(&map, &a, a.hash);
+    dshmap_insert(&map, &noise2, noise2.hash);
+    dshmap_insert(&map, &b, b.hash);
+    dshmap_insert(&map, &noise3, noise3.hash);
 
     int key = 7;
-    void *first = dshmap_find_key(&st, target_hash, &key, hashed_entry_eq);
-    void *second = dshmap_find_key_next(&st, target_hash, &key,
+    void *first = dshmap_find_key(&map, target_hash, &key, hashed_entry_eq);
+    void *second = dshmap_find_key_next(&map, target_hash, &key,
                                        hashed_entry_eq, first);
-    void *third = dshmap_find_key_next(&st, target_hash, &key,
+    void *third = dshmap_find_key_next(&map, target_hash, &key,
                                       hashed_entry_eq, second);
 
     assert((first == &a && second == &b) ||
@@ -593,9 +593,9 @@ test_find_key_skips_same_h2_noise(void)
     assert(third == NULL);
 
     key = 99;
-    assert(dshmap_find_key(&st, target_hash, &key, hashed_entry_eq) == NULL);
+    assert(dshmap_find_key(&map, target_hash, &key, hashed_entry_eq) == NULL);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
@@ -606,36 +606,36 @@ test_dense_hash_storage_policy(void)
         return;
     }
 
-    dshmap st;
-    dshmap_init(&st, counted_entry_hash);
+    dshmap map;
+    dshmap_init(&map, counted_entry_hash);
 
     struct counted_entry entries[8];
     size_t n = threshold < 8 ? threshold : 8;
     for (size_t i = 0; i < n; i++) {
         entries[i].key = (int)i;
         entries[i].hash = (dshmap_hash_t)(i * 17 + 1);
-        dshmap_insert(&st, &entries[i], entries[i].hash);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
     }
 
 #if DSHMAP_DENSE_STORE_HASHES
-    assert(st.hashes != NULL);
+    assert(map.hashes != NULL);
 #else
-    assert(st.hashes == NULL);
+    assert(map.hashes == NULL);
 #endif
-    assert(st.dense);
+    assert(map.dense);
     counted_hash_calls = 0;
 
     for (size_t i = 0; i < n; i++) {
-        assert(dshmap_find(&st, entries[i].hash) == &entries[i]);
+        assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
     }
-    assert(dshmap_find(&st, 999999) == NULL);
+    assert(dshmap_find(&map, 999999) == NULL);
 #if DSHMAP_DENSE_STORE_HASHES
     assert(counted_hash_calls == 0);
 #else
     assert(counted_hash_calls > 0);
 #endif
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
@@ -646,30 +646,30 @@ test_dense_remove_backshifts_cluster(void)
         return;
     }
 
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
 
     struct hashed_entry entries[8];
     for (size_t i = 0; i < 8; i++) {
         entries[i].key = (int)i;
         entries[i].hash = (dshmap_hash_t)(i * 8 + 1);
-        dshmap_insert(&st, &entries[i], entries[i].hash);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
     }
 
-    assert(st.dense);
+    assert(map.dense);
 
-    dshmap_remove(&st, &entries[0], entries[0].hash);
-    assert(dshmap_find(&st, entries[0].hash) == NULL);
+    dshmap_remove(&map, &entries[0], entries[0].hash);
+    assert(dshmap_find(&map, entries[0].hash) == NULL);
     for (size_t i = 1; i < 8; i++) {
-        assert(dshmap_find(&st, entries[i].hash) == &entries[i]);
+        assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
     }
 
     struct hashed_entry extra = { .key = 99, .hash = (dshmap_hash_t)(99 * 8 + 1) };
-    dshmap_insert(&st, &extra, extra.hash);
-    assert(dshmap_find(&st, extra.hash) == &extra);
-    assert(dshmap_size(&st) == 8);
+    dshmap_insert(&map, &extra, extra.hash);
+    assert(dshmap_find(&map, extra.hash) == &extra);
+    assert(dshmap_size(&map) == 8);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
@@ -680,8 +680,8 @@ test_dense_promotes_to_swiss_at_threshold(void)
         return;
     }
 
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
 
     size_t n = threshold + 1;
     struct hashed_entry *entries = malloc(n * sizeof(*entries));
@@ -690,27 +690,27 @@ test_dense_promotes_to_swiss_at_threshold(void)
     for (size_t i = 0; i < threshold; i++) {
         entries[i].key = (int)i;
         entries[i].hash = (dshmap_hash_t)(i * 2654435761u + 1);
-        dshmap_insert(&st, &entries[i], entries[i].hash);
-        assert(st.dense);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+        assert(map.dense);
     }
 
     entries[threshold].key = (int)threshold;
     entries[threshold].hash = (dshmap_hash_t)(threshold * 2654435761u + 1);
-    dshmap_insert(&st, &entries[threshold], entries[threshold].hash);
+    dshmap_insert(&map, &entries[threshold], entries[threshold].hash);
 
-    assert(!st.dense);
+    assert(!map.dense);
 #if DSHMAP_SWISS_STORE_HASHES
-    assert(st.hashes != NULL);
+    assert(map.hashes != NULL);
 #else
-    assert(st.hashes == NULL);
+    assert(map.hashes == NULL);
 #endif
-    assert(dshmap_size(&st) == n);
+    assert(dshmap_size(&map) == n);
     for (size_t i = 0; i < n; i++) {
-        assert(dshmap_find(&st, entries[i].hash) == &entries[i]);
+        assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
     }
 
     free(entries);
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
@@ -721,8 +721,8 @@ test_dense_to_swiss_post_promotion_operations(void)
         return;
     }
 
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
 
     size_t n = threshold + 3;
     struct hashed_entry *entries = malloc(n * sizeof(*entries));
@@ -745,67 +745,67 @@ test_dense_to_swiss_post_promotion_operations(void)
     entries[3].hash = shared_hash + 0x80;
 
     for (size_t i = 0; i < threshold; i++) {
-        dshmap_insert(&st, &entries[i], entries[i].hash);
-        assert(st.dense);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+        assert(map.dense);
     }
 
     size_t shared_count = 0;
-    for (void *e = dshmap_find(&st, shared_hash); e;
-         e = dshmap_find_next(&st, shared_hash, e)) {
+    for (void *e = dshmap_find(&map, shared_hash); e;
+         e = dshmap_find_next(&map, shared_hash, e)) {
         assert(e == &entries[0] || e == &entries[1] || e == &entries[2]);
         shared_count++;
     }
     assert(shared_count == 3);
 
     int key = 777;
-    void *first = dshmap_find_key(&st, shared_hash, &key, hashed_entry_eq);
-    void *second = dshmap_find_key_next(&st, shared_hash, &key,
+    void *first = dshmap_find_key(&map, shared_hash, &key, hashed_entry_eq);
+    void *second = dshmap_find_key_next(&map, shared_hash, &key,
                                        hashed_entry_eq, first);
-    void *third = dshmap_find_key_next(&st, shared_hash, &key,
+    void *third = dshmap_find_key_next(&map, shared_hash, &key,
                                       hashed_entry_eq, second);
     assert((first == &entries[0] && second == &entries[1]) ||
            (first == &entries[1] && second == &entries[0]));
     assert(third == NULL);
 
-    dshmap_insert(&st, &entries[threshold], entries[threshold].hash);
-    assert(!st.dense);
-    assert(dshmap_size(&st) == threshold + 1);
+    dshmap_insert(&map, &entries[threshold], entries[threshold].hash);
+    assert(!map.dense);
+    assert(dshmap_size(&map) == threshold + 1);
 
     shared_count = 0;
-    for (void *e = dshmap_find(&st, shared_hash); e;
-         e = dshmap_find_next(&st, shared_hash, e)) {
+    for (void *e = dshmap_find(&map, shared_hash); e;
+         e = dshmap_find_next(&map, shared_hash, e)) {
         assert(e == &entries[0] || e == &entries[1] || e == &entries[2]);
         shared_count++;
     }
     assert(shared_count == 3);
 
-    first = dshmap_find_key(&st, shared_hash, &key, hashed_entry_eq);
-    second = dshmap_find_key_next(&st, shared_hash, &key,
+    first = dshmap_find_key(&map, shared_hash, &key, hashed_entry_eq);
+    second = dshmap_find_key_next(&map, shared_hash, &key,
                                  hashed_entry_eq, first);
-    third = dshmap_find_key_next(&st, shared_hash, &key,
+    third = dshmap_find_key_next(&map, shared_hash, &key,
                                 hashed_entry_eq, second);
     assert((first == &entries[0] && second == &entries[1]) ||
            (first == &entries[1] && second == &entries[0]));
     assert(third == NULL);
 
-    dshmap_remove(&st, &entries[1], entries[1].hash);
-    dshmap_remove(&st, &entries[threshold], entries[threshold].hash);
-    assert(dshmap_size(&st) == threshold - 1);
-    assert(dshmap_find(&st, entries[threshold].hash) == NULL);
-    assert(dshmap_find_key(&st, shared_hash, &key, hashed_entry_eq) ==
+    dshmap_remove(&map, &entries[1], entries[1].hash);
+    dshmap_remove(&map, &entries[threshold], entries[threshold].hash);
+    assert(dshmap_size(&map) == threshold - 1);
+    assert(dshmap_find(&map, entries[threshold].hash) == NULL);
+    assert(dshmap_find_key(&map, shared_hash, &key, hashed_entry_eq) ==
            &entries[0]);
-    assert(dshmap_find_key_next(&st, shared_hash, &key,
+    assert(dshmap_find_key_next(&map, shared_hash, &key,
                                 hashed_entry_eq, &entries[0]) == NULL);
 
     shared_count = 0;
-    for (void *e = dshmap_find(&st, shared_hash); e;
-         e = dshmap_find_next(&st, shared_hash, e)) {
+    for (void *e = dshmap_find(&map, shared_hash); e;
+         e = dshmap_find_next(&map, shared_hash, e)) {
         assert(e == &entries[0] || e == &entries[2]);
         shared_count++;
     }
     assert(shared_count == 2);
 
-    DSHMAP_FOR_EACH(entry, &st) {
+    DSHMAP_FOR_EACH(entry, &map) {
         struct hashed_entry *e = entry;
         assert(e >= entries && e < entries + n);
         seen[(size_t)(e - entries)] = true;
@@ -814,31 +814,31 @@ test_dense_to_swiss_post_promotion_operations(void)
         assert(seen[i] == (i != 1 && i != threshold));
     }
 
-    dshmap_clear(&st);
-    assert(dshmap_size(&st) == 0);
-    assert(dshmap_is_empty(&st));
-    DSHMAP_FOR_EACH(entry, &st) {
+    dshmap_clear(&map);
+    assert(dshmap_size(&map) == 0);
+    assert(dshmap_is_empty(&map));
+    DSHMAP_FOR_EACH(entry, &map) {
         (void)entry;
         assert(0 && "cleared promoted table yielded an entry");
     }
     for (size_t i = 0; i <= threshold; i++) {
-        assert(dshmap_find(&st, entries[i].hash) == NULL);
+        assert(dshmap_find(&map, entries[i].hash) == NULL);
     }
 
-    dshmap_insert(&st, &entries[threshold + 1],
+    dshmap_insert(&map, &entries[threshold + 1],
                   entries[threshold + 1].hash);
-    dshmap_insert(&st, &entries[threshold + 2],
+    dshmap_insert(&map, &entries[threshold + 2],
                   entries[threshold + 2].hash);
-    assert(!st.dense);
-    assert(dshmap_size(&st) == 2);
-    assert(dshmap_find(&st, entries[threshold + 1].hash) ==
+    assert(!map.dense);
+    assert(dshmap_size(&map) == 2);
+    assert(dshmap_find(&map, entries[threshold + 1].hash) ==
            &entries[threshold + 1]);
-    assert(dshmap_find(&st, entries[threshold + 2].hash) ==
+    assert(dshmap_find(&map, entries[threshold + 2].hash) ==
            &entries[threshold + 2]);
 
     free(seen);
     free(entries);
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
@@ -849,62 +849,62 @@ test_reserve_above_dense_threshold_uses_swiss(void)
         return;
     }
 
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
 
-    dshmap_reserve(&st, threshold + 1);
-    assert(st.slots != NULL);
-    assert(!st.dense);
+    dshmap_reserve(&map, threshold + 1);
+    assert(map.slots != NULL);
+    assert(!map.dense);
 #if DSHMAP_SWISS_STORE_HASHES
-    assert(st.hashes != NULL);
+    assert(map.hashes != NULL);
 #else
-    assert(st.hashes == NULL);
+    assert(map.hashes == NULL);
 #endif
 
     struct hashed_entry entries[16];
     for (size_t i = 0; i < 16; i++) {
         entries[i].key = (int)i;
         entries[i].hash = (dshmap_hash_t)(i + 1);
-        dshmap_insert(&st, &entries[i], entries[i].hash);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
     }
 
     for (size_t i = 0; i < 16; i++) {
-        assert(dshmap_find(&st, entries[i].hash) == &entries[i]);
+        assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_swiss_hash_storage_policy(void)
 {
-    dshmap st;
-    dshmap_init(&st, counted_entry_hash);
+    dshmap map;
+    dshmap_init(&map, counted_entry_hash);
 
     size_t reserve_n = (size_t)DSHMAP_DENSE_THRESHOLD + 1;
     if (reserve_n < 16) {
         reserve_n = 16;
     }
-    dshmap_reserve(&st, reserve_n);
+    dshmap_reserve(&map, reserve_n);
 
-    assert(st.slots != NULL);
-    assert(!st.dense);
+    assert(map.slots != NULL);
+    assert(!map.dense);
 #if DSHMAP_SWISS_STORE_HASHES
-    assert(st.hashes != NULL);
+    assert(map.hashes != NULL);
 #else
-    assert(st.hashes == NULL);
+    assert(map.hashes == NULL);
 #endif
 
     struct counted_entry entries[8];
     for (size_t i = 0; i < 8; i++) {
         entries[i].key = (int)i;
         entries[i].hash = (dshmap_hash_t)(i * 17 + 1);
-        dshmap_insert(&st, &entries[i], entries[i].hash);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
     }
 
     counted_hash_calls = 0;
     for (size_t i = 0; i < 8; i++) {
-        assert(dshmap_find(&st, entries[i].hash) == &entries[i]);
+        assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
     }
 #if DSHMAP_SWISS_STORE_HASHES
     assert(counted_hash_calls == 0);
@@ -912,173 +912,173 @@ test_swiss_hash_storage_policy(void)
     assert(counted_hash_calls > 0);
 #endif
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_remove(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     void *a = (void *)10;
     void *b = (void *)20;
     void *c = (void *)30;
-    dshmap_insert(&st, a, dummy_hash(a));
-    dshmap_insert(&st, b, dummy_hash(b));
-    dshmap_insert(&st, c, dummy_hash(c));
+    dshmap_insert(&map, a, dummy_hash(a));
+    dshmap_insert(&map, b, dummy_hash(b));
+    dshmap_insert(&map, c, dummy_hash(c));
 
-    dshmap_remove(&st, b, dummy_hash(b));
-    assert(dshmap_size(&st) == 2);
-    assert(dshmap_find(&st, dummy_hash(b)) == NULL);
-    assert(dshmap_find(&st, dummy_hash(a)) == a);
-    assert(dshmap_find(&st, dummy_hash(c)) == c);
+    dshmap_remove(&map, b, dummy_hash(b));
+    assert(dshmap_size(&map) == 2);
+    assert(dshmap_find(&map, dummy_hash(b)) == NULL);
+    assert(dshmap_find(&map, dummy_hash(a)) == a);
+    assert(dshmap_find(&map, dummy_hash(c)) == c);
 
-    dshmap_remove(&st, a, dummy_hash(a));
-    assert(dshmap_size(&st) == 1);
-    assert(dshmap_find(&st, dummy_hash(a)) == NULL);
-    assert(dshmap_find(&st, dummy_hash(c)) == c);
+    dshmap_remove(&map, a, dummy_hash(a));
+    assert(dshmap_size(&map) == 1);
+    assert(dshmap_find(&map, dummy_hash(a)) == NULL);
+    assert(dshmap_find(&map, dummy_hash(c)) == c);
 
-    dshmap_remove(&st, c, dummy_hash(c));
-    assert(dshmap_size(&st) == 0);
-    assert(dshmap_is_empty(&st));
+    dshmap_remove(&map, c, dummy_hash(c));
+    assert(dshmap_size(&map) == 0);
+    assert(dshmap_is_empty(&map));
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_clear(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     for (size_t i = 1; i <= 10; i++) {
-        dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
-    assert(dshmap_size(&st) == 10);
+    assert(dshmap_size(&map) == 10);
 
-    dshmap_clear(&st);
-    assert(dshmap_size(&st) == 0);
-    assert(dshmap_is_empty(&st));
+    dshmap_clear(&map);
+    assert(dshmap_size(&map) == 0);
+    assert(dshmap_is_empty(&map));
     for (size_t i = 1; i <= 10; i++) {
-        assert(dshmap_find(&st, dummy_hash((void *)i)) == NULL);
+        assert(dshmap_find(&map, dummy_hash((void *)i)) == NULL);
     }
 
     for (size_t i = 100; i <= 105; i++) {
-        dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
-    assert(dshmap_size(&st) == 6);
+    assert(dshmap_size(&map) == 6);
     for (size_t i = 100; i <= 105; i++) {
-        assert(dshmap_find(&st, dummy_hash((void *)i)) == (void *)i);
+        assert(dshmap_find(&map, dummy_hash((void *)i)) == (void *)i);
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_clear_after_tombstone_heavy_table(void)
 {
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
-    dshmap_reserve(&st, 28);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+    dshmap_reserve(&map, 28);
 
     struct hashed_entry entries[28];
     for (size_t i = 0; i < 28; i++) {
         entries[i].key = (int)i;
         entries[i].hash = ((dshmap_hash_t)(i * 4) << 7) | (i + 1);
-        dshmap_insert(&st, &entries[i], entries[i].hash);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
     }
-    assert(dshmap_size(&st) == 28);
+    assert(dshmap_size(&map) == 28);
 
     for (size_t i = 0; i < 20; i++) {
-        dshmap_remove(&st, &entries[i], entries[i].hash);
+        dshmap_remove(&map, &entries[i], entries[i].hash);
     }
-    assert(dshmap_size(&st) == 8);
+    assert(dshmap_size(&map) == 8);
 
-    dshmap_clear(&st);
-    assert(dshmap_size(&st) == 0);
-    assert(dshmap_is_empty(&st));
+    dshmap_clear(&map);
+    assert(dshmap_size(&map) == 0);
+    assert(dshmap_is_empty(&map));
 
     size_t count = 0;
-    DSHMAP_FOR_EACH(entry, &st) {
+    DSHMAP_FOR_EACH(entry, &map) {
         (void)entry;
         count++;
     }
     assert(count == 0);
 
     for (size_t i = 0; i < 28; i++) {
-        assert(dshmap_find(&st, entries[i].hash) == NULL);
+        assert(dshmap_find(&map, entries[i].hash) == NULL);
     }
 
     struct hashed_entry fresh[5];
     for (size_t i = 0; i < 5; i++) {
         fresh[i].key = (int)i + 100;
         fresh[i].hash = ((dshmap_hash_t)(i * 4) << 7) | (40 + i);
-        dshmap_insert(&st, &fresh[i], fresh[i].hash);
+        dshmap_insert(&map, &fresh[i], fresh[i].hash);
     }
-    assert(dshmap_size(&st) == 5);
+    assert(dshmap_size(&map) == 5);
 
     for (size_t i = 0; i < 5; i++) {
-        assert(dshmap_find(&st, fresh[i].hash) == &fresh[i]);
+        assert(dshmap_find(&map, fresh[i].hash) == &fresh[i]);
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_reserve(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
-    dshmap_reserve(&st, 100);
-    size_t mask_after_reserve = st.group_mask;
+    dshmap_reserve(&map, 100);
+    size_t mask_after_reserve = map.group_mask;
     assert(mask_after_reserve > 0);
 
     for (size_t i = 1; i <= 100; i++) {
-        dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
-    assert(st.group_mask == mask_after_reserve);
-    assert(dshmap_size(&st) == 100);
+    assert(map.group_mask == mask_after_reserve);
+    assert(dshmap_size(&map) == 100);
 
     for (size_t i = 1; i <= 100; i++) {
-        assert(dshmap_find(&st, dummy_hash((void *)i)) == (void *)i);
+        assert(dshmap_find(&map, dummy_hash((void *)i)) == (void *)i);
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_reserve_zero_noop(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
-    dshmap_reserve(&st, 0);
-    assert(dshmap_size(&st) == 0);
-    assert(dshmap_is_empty(&st));
-    assert(st.slots == NULL);
+    dshmap_reserve(&map, 0);
+    assert(dshmap_size(&map) == 0);
+    assert(dshmap_is_empty(&map));
+    assert(map.slots == NULL);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_reserve_noop(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
-    dshmap_reserve(&st, 5);
-    size_t mask = st.group_mask;
+    dshmap_reserve(&map, 5);
+    size_t mask = map.group_mask;
 
     for (size_t i = 1; i <= 5; i++) {
-        dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
 
-    dshmap_reserve(&st, 3);
-    assert(st.group_mask == mask);
+    dshmap_reserve(&map, 3);
+    assert(map.group_mask == mask);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
@@ -1089,19 +1089,19 @@ test_reserve_promotes_dense_table(void)
         return;
     }
 
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
 
     struct hashed_entry entry = { .key = 1, .hash = 1 };
-    dshmap_insert(&st, &entry, entry.hash);
-    assert(st.dense);
+    dshmap_insert(&map, &entry, entry.hash);
+    assert(map.dense);
 
-    dshmap_reserve(&st, threshold + 1);
-    assert(!st.dense);
-    assert(dshmap_size(&st) == 1);
-    assert(dshmap_find(&st, entry.hash) == &entry);
+    dshmap_reserve(&map, threshold + 1);
+    assert(!map.dense);
+    assert(dshmap_size(&map) == 1);
+    assert(dshmap_find(&map, entry.hash) == &entry);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
@@ -1112,128 +1112,128 @@ test_swiss_reserve_noop_and_growth(void)
         reserve_n = 16;
     }
 
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
 
-    dshmap_reserve(&st, reserve_n);
-    assert(!st.dense);
+    dshmap_reserve(&map, reserve_n);
+    assert(!map.dense);
 
-    size_t old_mask = st.group_mask;
-    dshmap_reserve(&st, 1);
-    assert(st.group_mask == old_mask);
+    size_t old_mask = map.group_mask;
+    dshmap_reserve(&map, 1);
+    assert(map.group_mask == old_mask);
 
-    dshmap_reserve(&st, st.size + st.growth_left + 1);
-    assert(st.group_mask > old_mask);
+    dshmap_reserve(&map, map.size + map.growth_left + 1);
+    assert(map.group_mask > old_mask);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_reserve_after_tombstone_churn(void)
 {
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
-    dshmap_reserve(&st, 28);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+    dshmap_reserve(&map, 28);
 
     struct hashed_entry entries[28];
     for (size_t i = 0; i < 28; i++) {
         entries[i].key = (int)i;
         entries[i].hash = ((dshmap_hash_t)(i * 4) << 7) | (i + 1);
-        dshmap_insert(&st, &entries[i], entries[i].hash);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
     }
-    assert(dshmap_size(&st) == 28);
+    assert(dshmap_size(&map) == 28);
 
     size_t removed = 0;
     for (size_t i = 0; i < 28; i += 3) {
-        dshmap_remove(&st, &entries[i], entries[i].hash);
+        dshmap_remove(&map, &entries[i], entries[i].hash);
         removed++;
     }
-    assert(dshmap_size(&st) == 28 - removed);
+    assert(dshmap_size(&map) == 28 - removed);
 
-    size_t old_mask = st.group_mask;
-    dshmap_reserve(&st, 100);
-    assert(st.group_mask > old_mask);
-    assert(dshmap_size(&st) == 28 - removed);
+    size_t old_mask = map.group_mask;
+    dshmap_reserve(&map, 100);
+    assert(map.group_mask > old_mask);
+    assert(dshmap_size(&map) == 28 - removed);
 
     for (size_t i = 0; i < 28; i++) {
         if (i % 3 == 0) {
-            assert(dshmap_find(&st, entries[i].hash) == NULL);
+            assert(dshmap_find(&map, entries[i].hash) == NULL);
         } else {
-            assert(dshmap_find(&st, entries[i].hash) == &entries[i]);
+            assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
         }
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_growth(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     size_t n = 500;
     size_t prev_mask = 0;
     int resizes = 0;
 
     for (size_t i = 1; i <= n; i++) {
-        dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
-        if (st.group_mask != prev_mask) {
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
+        if (map.group_mask != prev_mask) {
             resizes++;
-            prev_mask = st.group_mask;
+            prev_mask = map.group_mask;
 
             for (size_t j = 1; j <= i; j++) {
-                assert(dshmap_find(&st, dummy_hash((void *)j)) == (void *)j);
+                assert(dshmap_find(&map, dummy_hash((void *)j)) == (void *)j);
             }
         }
     }
 
     assert(resizes >= 3);
-    assert(dshmap_size(&st) == n);
+    assert(dshmap_size(&map) == n);
 
     for (size_t i = 1; i <= n; i++) {
-        assert(dshmap_find(&st, dummy_hash((void *)i)) == (void *)i);
+        assert(dshmap_find(&map, dummy_hash((void *)i)) == (void *)i);
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_large_table(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     size_t n = 50000;
     for (size_t i = 1; i <= n; i++) {
-        dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
-    assert(dshmap_size(&st) == n);
+    assert(dshmap_size(&map) == n);
 
     for (size_t i = 1; i <= n; i++) {
-        assert(dshmap_find(&st, dummy_hash((void *)i)) == (void *)i);
+        assert(dshmap_find(&map, dummy_hash((void *)i)) == (void *)i);
     }
 
-    assert(dshmap_find(&st, dummy_hash((void *)(n + 1))) == NULL);
-    assert(dshmap_find(&st, dummy_hash((void *)(n + 1000))) == NULL);
+    assert(dshmap_find(&map, dummy_hash((void *)(n + 1))) == NULL);
+    assert(dshmap_find(&map, dummy_hash((void *)(n + 1000))) == NULL);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_iteration(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     size_t n = 200;
     for (size_t i = 1; i <= n; i++) {
-        dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
 
     bool seen[201] = {0};
     size_t count = 0;
-    DSHMAP_FOR_EACH(entry, &st) {
+    DSHMAP_FOR_EACH(entry, &map) {
         size_t val = (size_t)entry;
         assert(val >= 1 && val <= n);
         assert(!seen[val]);
@@ -1242,257 +1242,257 @@ test_iteration(void)
     }
     assert(count == n);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_iteration_empty(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     size_t count = 0;
-    DSHMAP_FOR_EACH(entry, &st) {
+    DSHMAP_FOR_EACH(entry, &map) {
         (void)entry;
         count++;
     }
     assert(count == 0);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_find_empty(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
-    assert(dshmap_find(&st, dummy_hash((void *)1)) == NULL);
-    assert(dshmap_find(&st, 0) == NULL);
-    assert(dshmap_find(&st, 999) == NULL);
-    dshmap_destroy(&st);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+    assert(dshmap_find(&map, dummy_hash((void *)1)) == NULL);
+    assert(dshmap_find(&map, 0) == NULL);
+    assert(dshmap_find(&map, 999) == NULL);
+    dshmap_destroy(&map);
 }
 
 static void
 test_remove_empty(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
-    dshmap_remove(&st, (void *)1, dummy_hash((void *)1));
-    assert(dshmap_size(&st) == 0);
-    assert(dshmap_is_empty(&st));
-    dshmap_destroy(&st);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+    dshmap_remove(&map, (void *)1, dummy_hash((void *)1));
+    assert(dshmap_size(&map) == 0);
+    assert(dshmap_is_empty(&map));
+    dshmap_destroy(&map);
 }
 
 static void
 test_remove_nonexistent(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     void *a = (void *)10;
     void *b = (void *)20;
-    dshmap_insert(&st, a, dummy_hash(a));
-    dshmap_insert(&st, b, dummy_hash(b));
+    dshmap_insert(&map, a, dummy_hash(a));
+    dshmap_insert(&map, b, dummy_hash(b));
 
-    dshmap_remove(&st, (void *)30, dummy_hash((void *)30));
-    assert(dshmap_size(&st) == 2);
-    assert(dshmap_find(&st, dummy_hash(a)) == a);
-    assert(dshmap_find(&st, dummy_hash(b)) == b);
+    dshmap_remove(&map, (void *)30, dummy_hash((void *)30));
+    assert(dshmap_size(&map) == 2);
+    assert(dshmap_find(&map, dummy_hash(a)) == a);
+    assert(dshmap_find(&map, dummy_hash(b)) == b);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_clear_empty(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
-    dshmap_clear(&st);
-    assert(dshmap_size(&st) == 0);
-    assert(dshmap_is_empty(&st));
-    dshmap_destroy(&st);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+    dshmap_clear(&map);
+    assert(dshmap_size(&map) == 0);
+    assert(dshmap_is_empty(&map));
+    dshmap_destroy(&map);
 }
 
 static void
 test_insert_after_remove(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     for (size_t i = 1; i <= 20; i++) {
-        dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
     for (size_t i = 1; i <= 20; i++) {
-        dshmap_remove(&st, (void *)i, dummy_hash((void *)i));
+        dshmap_remove(&map, (void *)i, dummy_hash((void *)i));
     }
-    assert(dshmap_size(&st) == 0);
+    assert(dshmap_size(&map) == 0);
 
     for (size_t i = 100; i <= 119; i++) {
-        dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
-    assert(dshmap_size(&st) == 20);
+    assert(dshmap_size(&map) == 20);
     for (size_t i = 100; i <= 119; i++) {
-        assert(dshmap_find(&st, dummy_hash((void *)i)) == (void *)i);
+        assert(dshmap_find(&map, dummy_hash((void *)i)) == (void *)i);
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_reinsert_same(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     void *entry = (void *)42;
-    dshmap_insert(&st, entry, dummy_hash(entry));
-    assert(dshmap_find(&st, dummy_hash(entry)) == entry);
+    dshmap_insert(&map, entry, dummy_hash(entry));
+    assert(dshmap_find(&map, dummy_hash(entry)) == entry);
 
-    dshmap_remove(&st, entry, dummy_hash(entry));
-    assert(dshmap_find(&st, dummy_hash(entry)) == NULL);
+    dshmap_remove(&map, entry, dummy_hash(entry));
+    assert(dshmap_find(&map, dummy_hash(entry)) == NULL);
 
-    dshmap_insert(&st, entry, dummy_hash(entry));
-    assert(dshmap_find(&st, dummy_hash(entry)) == entry);
-    assert(dshmap_size(&st) == 1);
+    dshmap_insert(&map, entry, dummy_hash(entry));
+    assert(dshmap_find(&map, dummy_hash(entry)) == entry);
+    assert(dshmap_size(&map) == 1);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_churn(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     for (int round = 0; round < 10; round++) {
         size_t base = (size_t)round * 100 + 1;
         for (size_t i = base; i < base + 100; i++) {
-            dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
+            dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
         }
         for (size_t i = base; i < base + 50; i++) {
-            dshmap_remove(&st, (void *)i, dummy_hash((void *)i));
+            dshmap_remove(&map, (void *)i, dummy_hash((void *)i));
         }
     }
 
     for (int round = 0; round < 10; round++) {
         size_t base = (size_t)round * 100 + 1;
         for (size_t i = base; i < base + 50; i++) {
-            assert(dshmap_find(&st, dummy_hash((void *)i)) == NULL);
+            assert(dshmap_find(&map, dummy_hash((void *)i)) == NULL);
         }
         for (size_t i = base + 50; i < base + 100; i++) {
-            assert(dshmap_find(&st, dummy_hash((void *)i)) == (void *)i);
+            assert(dshmap_find(&map, dummy_hash((void *)i)) == (void *)i);
         }
     }
-    assert(dshmap_size(&st) == 500);
+    assert(dshmap_size(&map) == 500);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_load_factor_boundary(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
-    dshmap_insert(&st, (void *)1, dummy_hash((void *)1));
-    size_t next = fill_until_growth_left_zero(&st, 2);
-    size_t mask = st.group_mask;
+    dshmap_insert(&map, (void *)1, dummy_hash((void *)1));
+    size_t next = fill_until_growth_left_zero(&map, 2);
+    size_t mask = map.group_mask;
 
-    dshmap_insert(&st, (void *)next, dummy_hash((void *)next));
-    assert(st.group_mask > mask);
+    dshmap_insert(&map, (void *)next, dummy_hash((void *)next));
+    assert(map.group_mask > mask);
 
     for (size_t i = 1; i <= next; i++) {
-        assert(dshmap_find(&st, dummy_hash((void *)i)) == (void *)i);
+        assert(dshmap_find(&map, dummy_hash((void *)i)) == (void *)i);
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_remove_empty_slot_restores_growth(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
-    dshmap_insert(&st, (void *)1, dummy_hash((void *)1));
-    size_t next = fill_until_growth_left_zero(&st, 2);
-    size_t mask = st.group_mask;
+    dshmap_insert(&map, (void *)1, dummy_hash((void *)1));
+    size_t next = fill_until_growth_left_zero(&map, 2);
+    size_t mask = map.group_mask;
     size_t last = next - 1;
-    assert(st.growth_left == 0);
+    assert(map.growth_left == 0);
 
-    dshmap_remove(&st, (void *)last, dummy_hash((void *)last));
-    assert(st.growth_left == 1);
+    dshmap_remove(&map, (void *)last, dummy_hash((void *)last));
+    assert(map.growth_left == 1);
 
-    dshmap_insert(&st, (void *)100, dummy_hash((void *)100));
-    assert(st.group_mask == mask);
-    assert(st.growth_left == 0);
-    assert(dshmap_size(&st) == last);
-    assert(dshmap_find(&st, dummy_hash((void *)100)) == (void *)100);
+    dshmap_insert(&map, (void *)100, dummy_hash((void *)100));
+    assert(map.group_mask == mask);
+    assert(map.growth_left == 0);
+    assert(dshmap_size(&map) == last);
+    assert(dshmap_find(&map, dummy_hash((void *)100)) == (void *)100);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_reuse_tombstone_at_boundary(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
-    dshmap_reserve(&st, 14);
-    if (!st.dense) {
-        assert(st.group_mask == 1);
+    dshmap_reserve(&map, 14);
+    if (!map.dense) {
+        assert(map.group_mask == 1);
     }
 
     for (size_t i = 1; i <= 8; i++) {
-        dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
     for (size_t i = 129; i <= 134; i++) {
-        dshmap_insert(&st, (void *)i, dummy_hash((void *)i));
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
-    assert(dshmap_size(&st) == 14);
-    if (!st.dense) {
-        assert(st.growth_left == 0);
-    }
-
-    dshmap_remove(&st, (void *)1, dummy_hash((void *)1));
-    if (!st.dense) {
-        assert(st.group_mask == 1);
-        assert(st.growth_left == 0);
+    assert(dshmap_size(&map) == 14);
+    if (!map.dense) {
+        assert(map.growth_left == 0);
     }
 
-    dshmap_insert(&st, (void *)9, dummy_hash((void *)9));
-    if (!st.dense) {
-        assert(st.group_mask == 1);
-        assert(st.growth_left == 0);
+    dshmap_remove(&map, (void *)1, dummy_hash((void *)1));
+    if (!map.dense) {
+        assert(map.group_mask == 1);
+        assert(map.growth_left == 0);
     }
-    assert(dshmap_size(&st) == 14);
-    assert(dshmap_find(&st, dummy_hash((void *)9)) == (void *)9);
 
-    dshmap_destroy(&st);
+    dshmap_insert(&map, (void *)9, dummy_hash((void *)9));
+    if (!map.dense) {
+        assert(map.group_mask == 1);
+        assert(map.growth_left == 0);
+    }
+    assert(dshmap_size(&map) == 14);
+    assert(dshmap_find(&map, dummy_hash((void *)9)) == (void *)9);
+
+    dshmap_destroy(&map);
 }
 
 static void
 test_find_next_no_duplicates(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     void *a = (void *)10;
     void *b = (void *)20;
-    dshmap_insert(&st, a, dummy_hash(a));
-    dshmap_insert(&st, b, dummy_hash(b));
+    dshmap_insert(&map, a, dummy_hash(a));
+    dshmap_insert(&map, b, dummy_hash(b));
 
-    assert(dshmap_find_next(&st, dummy_hash(a), a) == NULL);
-    assert(dshmap_find_next(&st, dummy_hash(b), b) == NULL);
+    assert(dshmap_find_next(&map, dummy_hash(a), a) == NULL);
+    assert(dshmap_find_next(&map, dummy_hash(b), b) == NULL);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_find_next_filters_same_h2(void)
 {
-    dshmap st;
-    dshmap_init(&st, hashed_entry_hash);
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
 
     dshmap_hash_t target_hash = 0x2A;
     struct hashed_entry a = { .key = 1, .hash = target_hash };
@@ -1502,18 +1502,18 @@ test_find_next_filters_same_h2(void)
     struct hashed_entry noise2 = { .key = 5, .hash = 0x12A };
     struct hashed_entry noise3 = { .key = 6, .hash = 0x1AA };
 
-    dshmap_insert(&st, &noise1, noise1.hash);
-    dshmap_insert(&st, &a, a.hash);
-    dshmap_insert(&st, &noise2, noise2.hash);
-    dshmap_insert(&st, &b, b.hash);
-    dshmap_insert(&st, &noise3, noise3.hash);
-    dshmap_insert(&st, &c, c.hash);
+    dshmap_insert(&map, &noise1, noise1.hash);
+    dshmap_insert(&map, &a, a.hash);
+    dshmap_insert(&map, &noise2, noise2.hash);
+    dshmap_insert(&map, &b, b.hash);
+    dshmap_insert(&map, &noise3, noise3.hash);
+    dshmap_insert(&map, &c, c.hash);
 
     bool found_a = false, found_b = false, found_c = false;
     size_t count = 0;
-    for (void *e = dshmap_find(&st, target_hash);
+    for (void *e = dshmap_find(&map, target_hash);
          e;
-         e = dshmap_find_next(&st, target_hash, e)) {
+         e = dshmap_find_next(&map, target_hash, e)) {
         count++;
         if (e == &a) found_a = true;
         else if (e == &b) found_b = true;
@@ -1524,16 +1524,16 @@ test_find_next_filters_same_h2(void)
     assert(count == 3);
     assert(found_a && found_b && found_c);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_randomized_reference_model(void)
 {
-    dshmap st;
+    dshmap map;
     struct model_entry entries[MODEL_CAP] = {0};
 
-    dshmap_init(&st, hashed_entry_hash);
+    dshmap_init(&map, hashed_entry_hash);
     model_rng_seed(0x123456789ABCDEF0ULL);
 
     for (size_t i = 0; i < MODEL_CAP; i++) {
@@ -1550,7 +1550,7 @@ test_randomized_reference_model(void)
                                          model_rng_next() % MODEL_CAP);
             if (idx < MODEL_CAP) {
                 entries[idx].entry.hash = model_random_hash();
-                dshmap_insert(&st, &entries[idx].entry,
+                dshmap_insert(&map, &entries[idx].entry,
                              entries[idx].entry.hash);
                 entries[idx].live = true;
             }
@@ -1561,7 +1561,7 @@ test_randomized_reference_model(void)
             size_t idx = model_find_live(entries,
                                          model_rng_next() % MODEL_CAP);
             if (idx < MODEL_CAP) {
-                dshmap_remove(&st, &entries[idx].entry,
+                dshmap_remove(&map, &entries[idx].entry,
                              entries[idx].entry.hash);
                 entries[idx].live = false;
             }
@@ -1572,7 +1572,7 @@ test_randomized_reference_model(void)
                 .key = -1,
                 .hash = model_random_hash(),
             };
-            dshmap_remove(&st, &missing, missing.hash);
+            dshmap_remove(&map, &missing, missing.hash);
             break;
         }
         case 6:
@@ -1583,56 +1583,56 @@ test_randomized_reference_model(void)
             if (idx < MODEL_CAP && (model_rng_next() & 1)) {
                 hash = entries[idx].entry.hash;
             }
-            model_check_hash(&st, entries, hash);
+            model_check_hash(&map, entries, hash);
             break;
         }
         case 8:
-            dshmap_reserve(&st, model_rng_next() % (MODEL_CAP * 3));
+            dshmap_reserve(&map, model_rng_next() % (MODEL_CAP * 3));
             break;
         case 9:
             if ((model_rng_next() & 7) == 0) {
-                dshmap_clear(&st);
+                dshmap_clear(&map);
                 for (size_t i = 0; i < MODEL_CAP; i++) {
                     entries[i].live = false;
                 }
             } else {
-                model_check_hash(&st, entries, model_random_hash());
+                model_check_hash(&map, entries, model_random_hash());
             }
             break;
         }
 
-        model_check_all(&st, entries);
+        model_check_all(&map, entries);
     }
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 static void
 test_mixed_operations(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
-    dshmap_insert(&st, (void *)1, dummy_hash((void *)1));
-    dshmap_insert(&st, (void *)2, dummy_hash((void *)2));
-    dshmap_insert(&st, (void *)3, dummy_hash((void *)3));
-    assert(dshmap_size(&st) == 3);
+    dshmap_insert(&map, (void *)1, dummy_hash((void *)1));
+    dshmap_insert(&map, (void *)2, dummy_hash((void *)2));
+    dshmap_insert(&map, (void *)3, dummy_hash((void *)3));
+    assert(dshmap_size(&map) == 3);
 
-    dshmap_remove(&st, (void *)2, dummy_hash((void *)2));
-    assert(dshmap_size(&st) == 2);
+    dshmap_remove(&map, (void *)2, dummy_hash((void *)2));
+    assert(dshmap_size(&map) == 2);
 
-    dshmap_clear(&st);
-    assert(dshmap_size(&st) == 0);
+    dshmap_clear(&map);
+    assert(dshmap_size(&map) == 0);
 
-    dshmap_insert(&st, (void *)10, dummy_hash((void *)10));
-    dshmap_insert(&st, (void *)11, dummy_hash((void *)11));
-    assert(dshmap_size(&st) == 2);
+    dshmap_insert(&map, (void *)10, dummy_hash((void *)10));
+    dshmap_insert(&map, (void *)11, dummy_hash((void *)11));
+    assert(dshmap_size(&map) == 2);
 
-    assert(dshmap_find(&st, dummy_hash((void *)1)) == NULL);
-    assert(dshmap_find(&st, dummy_hash((void *)10)) == (void *)10);
-    assert(dshmap_find(&st, dummy_hash((void *)11)) == (void *)11);
+    assert(dshmap_find(&map, dummy_hash((void *)1)) == NULL);
+    assert(dshmap_find(&map, dummy_hash((void *)10)) == (void *)10);
+    assert(dshmap_find(&map, dummy_hash((void *)11)) == (void *)11);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
 }
 
 int

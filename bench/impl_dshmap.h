@@ -55,8 +55,8 @@ impl_dshmap_clear(void *ctx)
 static void
 impl_dshmap_for_each(const void *ctx, bench_iter_cb cb, void *arg)
 {
-    const dshmap *st = (const dshmap *)ctx;
-    DSHMAP_FOR_EACH(entry, st) {
+    const dshmap *map = (const dshmap *)ctx;
+    DSHMAP_FOR_EACH(entry, map) {
         cb(entry, arg);
     }
 }
@@ -64,13 +64,13 @@ impl_dshmap_for_each(const void *ctx, bench_iter_cb cb, void *arg)
 static size_t
 impl_dshmap_memory_usage(const void *ctx)
 {
-    const dshmap *st = (const dshmap *)ctx;
-    if (st->slots == NULL)
+    const dshmap *map = (const dshmap *)ctx;
+    if (map->slots == NULL)
         return 0;
 
-    size_t capacity = (st->group_mask + 1) * 8;
+    size_t capacity = (map->group_mask + 1) * 8;
     size_t bytes = capacity * (1 + sizeof(void *));
-    if (st->hashes != NULL)
+    if (map->hashes != NULL)
         bytes += capacity * sizeof(dshmap_hash_t);
     return bytes;
 }

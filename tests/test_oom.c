@@ -37,25 +37,25 @@ dummy_hash(const void *entry)
 int
 main(void)
 {
-    dshmap st;
-    dshmap_init(&st, dummy_hash);
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
 
     fail_alloc = 1;
     if (setjmp(oom_env) == 0) {
-        dshmap_insert(&st, (void *)1, dummy_hash((void *)1));
+        dshmap_insert(&map, (void *)1, dummy_hash((void *)1));
         assert(0 && "dshmap_insert did not invoke DSHMAP_OOM");
     }
 
     assert(oom_called == 1);
-    assert(dshmap_size(&st) == 0);
-    assert(dshmap_is_empty(&st));
-    assert(dshmap_find(&st, dummy_hash((void *)1)) == NULL);
+    assert(dshmap_size(&map) == 0);
+    assert(dshmap_is_empty(&map));
+    assert(dshmap_find(&map, dummy_hash((void *)1)) == NULL);
 
     fail_alloc = 0;
-    dshmap_insert(&st, (void *)1, dummy_hash((void *)1));
-    assert(dshmap_size(&st) == 1);
-    assert(dshmap_find(&st, dummy_hash((void *)1)) == (void *)1);
+    dshmap_insert(&map, (void *)1, dummy_hash((void *)1));
+    assert(dshmap_size(&map) == 1);
+    assert(dshmap_find(&map, dummy_hash((void *)1)) == (void *)1);
 
-    dshmap_destroy(&st);
+    dshmap_destroy(&map);
     return 0;
 }
