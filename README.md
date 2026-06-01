@@ -105,6 +105,7 @@ make bench
 Pass benchmark arguments through `BENCH_ARGS`:
 
 ```
+make bench BENCH_ARGS="--help"
 make bench BENCH_ARGS="--compare --geometric 1:65536:2 --ops find_hit,find_miss,mixed"
 ```
 
