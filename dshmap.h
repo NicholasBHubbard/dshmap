@@ -26,7 +26,7 @@
 
 /* DSHMAP_LOAD_FACTOR_NUM / DSHMAP_LOAD_FACTOR_DEN - Maximum load factor.
  *
- * The swiss layout resizes when occupancy exceeds NUM/DEN of capacity.
+ * The Swiss layout resizes when occupancy exceeds NUM/DEN of capacity.
  * Default is 7/8 (87.5%). Define both macros before including this
  * header to override. Dense mode uses an internal 3/4 load factor.
  *
@@ -44,18 +44,19 @@
 /* DSHMAP_DENSE_THRESHOLD - Maximum entries kept in dense mode.
  *
  * Tables start as a simple open-addressed table. Once an insert would
- * exceed this threshold, the table promotes to the swiss layout. Define
- * as 0 to disable dense mode.
+ * exceed this threshold, the table promotes to the Swiss layout. Reserve
+ * can also promote the table. Promotion is one-way; clear does not move
+ * a table back to dense mode. Define as 0 to disable dense mode.
  */
 #ifndef DSHMAP_DENSE_THRESHOLD
 #define DSHMAP_DENSE_THRESHOLD 2048
 #endif
 
-/* DSHMAP_DENSE_STORE_HASHES / DSHMAP_SWISS_STORE_HASHES - Hash caching.
+/* DSHMAP_DENSE_STORE_HASHES / DSHMAP_SWISS_STORE_HASHES - Hash storage.
  *
  * Define as 1 to store one full hash per slot in that layout, or 0 to
  * recompute hashes from entries when needed. Dense mode stores hashes by
- * default; swiss mode does not.
+ * default; Swiss mode does not.
  */
 #ifndef DSHMAP_DENSE_STORE_HASHES
 #define DSHMAP_DENSE_STORE_HASHES 1
@@ -91,7 +92,9 @@
 /* DSHMAP_MALLOC / DSHMAP_FREE - Allocation hooks.
  *
  * Defaults to malloc/free. Define both macros before including this
- * header to override.
+ * header to override. DSHMAP_MALLOC must return memory with the same
+ * alignment guarantees as malloc. DSHMAP_FREE must be able to free memory
+ * returned by DSHMAP_MALLOC. Do not mix unrelated allocators.
  */
 #ifndef DSHMAP_MALLOC
 #define DSHMAP_MALLOC malloc
@@ -115,8 +118,9 @@
  * dshmap_hash_fn - Hash function signature.
  *
  * Must return the same value for a given entry for the lifetime of the
- * table. The table may call this during find, find_next, and resize when
- * hash storage is disabled for the active layout.
+ * table. The table may call this to recompute an entry's hash when full
+ * hashes are not stored for the active layout, or were not stored for a
+ * layout being resized or promoted.
  *
  *     dshmap_hash_t my_hash(const void *entry) {
  *         const struct my_obj *obj = entry;
@@ -130,7 +134,7 @@ typedef dshmap_hash_t (*dshmap_hash_fn)(const void *entry);
  *
  * Compares a table entry with a lookup key. Return true when the entry
  * matches the key. Key equality must be compatible with the lookup hash:
- * when eq_fn(entry, key) is true, hash_fn(entry) must equal the hash
+ * when eq_fn(entry, key) is true, the entry's full hash must equal the hash
  * passed to dshmap_find_key(). Used by dshmap_find_key() to resolve hash
  * collisions.
  *
@@ -142,16 +146,24 @@ typedef dshmap_hash_t (*dshmap_hash_fn)(const void *entry);
  */
 typedef bool (*dshmap_key_eq_fn)(const void *entry, const void *key);
 
-/* dshmap - A dense-to-swiss hash map.
+/* dshmap - A dense-to-Swiss hash map.
  *
  * Stores non-NULL void pointers to caller-owned entries. Entries are
  * located by hash; the caller provides a hash function that can
  * recompute the hash from an entry pointer. NULL entries are not
  * supported because NULL is used as the lookup miss result.
  * Tables use a simple dense open-addressed layout up to
- * DSHMAP_DENSE_THRESHOLD entries, then promote to the swiss layout.
- * Full-hash caching can be configured per layout with
+ * DSHMAP_DENSE_THRESHOLD entries, then promote to the Swiss layout.
+ * Full-hash storage can be configured per layout with
  * DSHMAP_DENSE_STORE_HASHES and DSHMAP_SWISS_STORE_HASHES.
+ * Promotion is one-way. A promoted table stays Swiss until destroy.
+ *
+ * The struct fields are visible so the type can be stack allocated, but
+ * they are implementation details. Application code should not read or
+ * write them directly.
+ *
+ * dshmap has no internal locking. Use external locking if any thread may
+ * mutate the table while another thread can access it.
  *
  * Must be initialized with dshmap_init() before use and cleaned up with
  * dshmap_destroy(). Stack allocation is typical:
@@ -162,8 +174,8 @@ typedef bool (*dshmap_key_eq_fn)(const void *entry, const void *key);
 typedef struct dshmap {
     int8_t *ctrl;         /* H2 tag per slot; empty=0x80, deleted=0xFE */
     void **slots;         /* one entry pointer per slot */
-    dshmap_hash_t *hashes; /* cached full hashes, if enabled */
-    dshmap_hash_fn hash_fn; /* rehash entries on resize */
+    dshmap_hash_t *hashes; /* stored full hashes, if enabled */
+    dshmap_hash_fn hash_fn; /* recompute hashes when needed */
     size_t size;          /* number of occupied slots */
     size_t group_mask;    /* num_groups - 1, for H1 & group_mask */
     size_t growth_left;   /* inserts remaining before resize */
@@ -173,7 +185,10 @@ typedef struct dshmap {
 /* dshmap_init - Initialize a table.
  *
  * The caller must call dshmap_destroy() when done. No memory is
- * allocated until the first insert.
+ * allocated until the first insert. hash_fn is normally required. It may
+ * be NULL only when the compile-time settings guarantee that every active
+ * layout stores full hashes. In the default config, pass a real hash
+ * function.
  *
  *     dshmap st;
  *     dshmap_init(&st, my_hash);
@@ -186,7 +201,8 @@ dshmap_init(dshmap *st, dshmap_hash_fn hash_fn);
 /* dshmap_destroy - Free all memory owned by the table.
  *
  * Does not free the entries themselves; the caller owns those. The
- * table is reset to its initialized state and may be reused.
+ * table is reset to its initialized state and may be reused. The table
+ * keeps the same hash_fn it was initialized with.
  *
  *     dshmap_destroy(&st);
  *     // st is now empty and valid, as if dshmap_init() was just called
@@ -216,7 +232,7 @@ dshmap_is_empty(const dshmap *st);
  *
  * Entry pointers are discarded but not freed; the caller owns those.
  * The table keeps its allocated capacity so subsequent inserts avoid
- * reallocation.
+ * reallocation. clear does not demote a Swiss table back to dense mode.
  *
  *     dshmap_clear(&st);
  *     assert(dshmap_is_empty(&st));
@@ -229,7 +245,9 @@ dshmap_clear(dshmap *st);
  *
  * No-op if the table can already hold 'count' entries without resizing.
  * Call this before a batch of inserts to allocate once upfront instead
- * of resizing repeatedly as the table grows.
+ * of resizing repeatedly as the table grows. Reserving more than
+ * DSHMAP_DENSE_THRESHOLD entries promotes the table to Swiss mode.
+ * Promotion is one-way.
  *
  *     dshmap_reserve(&st, n);
  *     for (size_t i = 0; i < n; i++) {
@@ -241,12 +259,14 @@ dshmap_reserve(dshmap *st, size_t count);
 
 /* dshmap_insert - Insert an entry into the table.
  *
- * The caller must provide a pre-computed hash. The entry pointer must
- * be non-NULL. Each entry pointer may have at most one membership in a
- * table; inserting the same entry pointer again while it is already
- * present is unsupported. Distinct entries with the same hash may
- * coexist and can be visited with dshmap_find_next(). The entry pointer
- * must remain valid for the lifetime of its membership in the table.
+ * The caller must provide a precomputed full hash for entry. If dshmap
+ * ever calls hash_fn(entry), it must return the same hash. The entry
+ * pointer must be non-NULL. Each entry pointer may have at most one
+ * membership in a table; inserting the same entry pointer again while it
+ * is already present is unsupported. Distinct entries with the same hash
+ * may coexist and can be visited with dshmap_find_next(). The entry
+ * pointer must remain valid for the lifetime of its membership in the
+ * table.
  *
  *     struct my_obj *obj = make_obj("foo");
  *     dshmap_insert(&st, obj, my_hash(obj));
@@ -257,8 +277,9 @@ dshmap_insert(dshmap *st, void *entry, dshmap_hash_t hash);
 /* dshmap_remove - Remove an entry from the table.
  *
  * Removes by pointer identity, not by hash equality. The caller must
- * pass the exact pointer that was inserted. No-op if the entry is not
- * found. Does not free the entry; the caller owns it.
+ * pass the exact pointer that was inserted and the same full hash used
+ * for insertion. No-op if the entry is not found. Does not free the
+ * entry; the caller owns it.
  *
  *     dshmap_remove(&st, obj, my_hash(obj));
  *     free(obj);
@@ -292,6 +313,10 @@ dshmap_find(const dshmap *st, dshmap_hash_t hash);
  * use dshmap_find() when hash equality alone is enough or when the caller
  * wants to iterate all same-hash candidates manually.
  *
+ * When full hashes are not stored, eq_fn may be called for entries with
+ * the same H2 tag (low 7 hash bits) but a different full hash. eq_fn must
+ * compare the real key and return false for non-matching entries.
+ *
  *     const char *name = "foo";
  *     dshmap_hash_t hash = hash_name(name);
  *     struct my_obj *obj = dshmap_find_key(&st, hash, name, my_eq);
@@ -307,7 +332,8 @@ dshmap_find_key(const dshmap *st, dshmap_hash_t hash, const void *key,
  * must be a pointer previously returned by dshmap_find_key() or
  * dshmap_find_key_next() for the same hash and key. This is the
  * key-aware counterpart to dshmap_find_next(). Uses the same
- * hash/equality compatibility contract as dshmap_find_key().
+ * hash/equality compatibility contract as dshmap_find_key(). eq_fn may
+ * see entries with the same H2 tag when full hashes are not stored.
  *
  *     dshmap_hash_t h = hash_name(name);
  *     for (void *e = dshmap_find_key(&st, h, name, my_eq);
@@ -340,7 +366,10 @@ dshmap_find_next(const dshmap *st, dshmap_hash_t hash, const void *prev);
  * 'var' is declared as void * in the loop scope. Entries must be
  * non-NULL; NULL is used internally as the loop sentinel. Iteration
  * order is arbitrary and not related to insertion order. Do not insert
- * or remove entries during iteration.
+ * or remove entries during iteration. The 'st' argument is evaluated
+ * more than once, so pass a simple table pointer with no side effects.
+ * A break statement inside the loop body only breaks one generated inner
+ * loop; it does not stop the whole iteration.
  *
  * Scans control groups using SWAR and visits occupied slots. Iteration
  * cost is affected by allocated table capacity and entry distribution.
