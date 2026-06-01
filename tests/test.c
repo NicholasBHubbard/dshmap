@@ -4,7 +4,7 @@
 
 #include "../swtab.h"
 
-#define RUN_TEST(fn) do { printf("  %-40s", #fn); fn(); printf("ok\n"); } while (0)
+#define RUN_TEST(fn) do { printf("  %-40s ", #fn); fn(); printf("ok\n"); } while (0)
 
 static swtab_hash_t
 dummy_hash(const void *entry)
@@ -89,7 +89,18 @@ struct hashed_entry {
     swtab_hash_t hash;
 };
 
+struct model_entry {
+    struct hashed_entry entry;
+    bool live;
+};
+
+enum {
+    MODEL_CAP = 128,
+    MODEL_STEPS = 20000,
+};
+
 static size_t counted_hash_calls;
+static uint64_t model_rng_state;
 
 static bool
 keyed_entry_eq(const void *entry, const void *key)
@@ -120,6 +131,162 @@ hashed_entry_eq(const void *entry, const void *key)
     const struct hashed_entry *e = entry;
     const int *k = key;
     return e->key == *k;
+}
+
+static void
+model_rng_seed(uint64_t seed)
+{
+    model_rng_state = seed;
+}
+
+static uint64_t
+model_rng_next(void)
+{
+    uint64_t x = model_rng_state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    model_rng_state = x;
+    return x;
+}
+
+static swtab_hash_t
+model_random_hash(void)
+{
+    uint64_t r = model_rng_next();
+    return (swtab_hash_t)(((r >> 7) & 0x3F) << 7) | (r & 0x0F);
+}
+
+static size_t
+model_index(const struct model_entry *entries, const void *entry)
+{
+    for (size_t i = 0; i < MODEL_CAP; i++) {
+        if (&entries[i].entry == entry) {
+            return i;
+        }
+    }
+    return MODEL_CAP;
+}
+
+static size_t
+model_find_free(const struct model_entry *entries, size_t start)
+{
+    for (size_t i = 0; i < MODEL_CAP; i++) {
+        size_t idx = (start + i) % MODEL_CAP;
+        if (!entries[idx].live) {
+            return idx;
+        }
+    }
+    return MODEL_CAP;
+}
+
+static size_t
+model_find_live(const struct model_entry *entries, size_t start)
+{
+    for (size_t i = 0; i < MODEL_CAP; i++) {
+        size_t idx = (start + i) % MODEL_CAP;
+        if (entries[idx].live) {
+            return idx;
+        }
+    }
+    return MODEL_CAP;
+}
+
+static size_t
+model_live_count(const struct model_entry *entries)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < MODEL_CAP; i++) {
+        if (entries[i].live) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static size_t
+model_live_hash_count(const struct model_entry *entries, swtab_hash_t hash)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < MODEL_CAP; i++) {
+        if (entries[i].live && entries[i].entry.hash == hash) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static bool
+model_has_live_hash(const struct model_entry *entries, swtab_hash_t hash)
+{
+    return model_live_hash_count(entries, hash) != 0;
+}
+
+static void
+model_check_hash(const swtab *st, const struct model_entry *entries,
+                 swtab_hash_t hash)
+{
+    bool seen[MODEL_CAP] = {0};
+    size_t count = 0;
+
+    for (void *entry = swtab_find(st, hash);
+         entry;
+         entry = swtab_find_next(st, hash, entry)) {
+        size_t idx = model_index(entries, entry);
+        assert(idx < MODEL_CAP);
+        assert(entries[idx].live);
+        assert(entries[idx].entry.hash == hash);
+        assert(!seen[idx]);
+        seen[idx] = true;
+        count++;
+    }
+
+    assert(count == model_live_hash_count(entries, hash));
+    for (size_t i = 0; i < MODEL_CAP; i++) {
+        if (entries[i].live && entries[i].entry.hash == hash) {
+            assert(seen[i]);
+        }
+    }
+}
+
+static void
+model_check_all(const swtab *st, const struct model_entry *entries)
+{
+    bool seen[MODEL_CAP] = {0};
+    size_t live = model_live_count(entries);
+    size_t iter_count = 0;
+
+    assert(swtab_size(st) == live);
+    assert(swtab_is_empty(st) == (live == 0));
+
+    SWTAB_FOR_EACH(entry, st) {
+        size_t idx = model_index(entries, entry);
+        assert(idx < MODEL_CAP);
+        assert(entries[idx].live);
+        assert(!seen[idx]);
+        seen[idx] = true;
+        iter_count++;
+    }
+    assert(iter_count == live);
+
+    for (size_t i = 0; i < MODEL_CAP; i++) {
+        swtab_hash_t hash = entries[i].entry.hash;
+        if (entries[i].live) {
+            int key = entries[i].entry.key;
+            void *found = swtab_find(st, hash);
+            size_t idx = model_index(entries, found);
+            assert(seen[i]);
+            assert(idx < MODEL_CAP);
+            assert(entries[idx].live);
+            assert(entries[idx].entry.hash == hash);
+            assert(swtab_find_key(st, hash, &key, hashed_entry_eq) ==
+                   &entries[i].entry);
+            assert(swtab_find_key_next(st, hash, &key, hashed_entry_eq,
+                                       &entries[i].entry) == NULL);
+        } else if (!model_has_live_hash(entries, hash)) {
+            assert(swtab_find(st, hash) == NULL);
+        }
+    }
 }
 
 static bool
@@ -961,6 +1128,86 @@ test_find_next_filters_same_h2(void)
 }
 
 static void
+test_randomized_reference_model(void)
+{
+    swtab st;
+    struct model_entry entries[MODEL_CAP] = {0};
+
+    swtab_init(&st, hashed_entry_hash);
+    model_rng_seed(0x123456789ABCDEF0ULL);
+
+    for (size_t i = 0; i < MODEL_CAP; i++) {
+        entries[i].entry.key = (int)i;
+        entries[i].entry.hash = model_random_hash();
+    }
+
+    for (size_t step = 0; step < MODEL_STEPS; step++) {
+        switch (model_rng_next() % 10) {
+        case 0:
+        case 1:
+        case 2: {
+            size_t idx = model_find_free(entries,
+                                         model_rng_next() % MODEL_CAP);
+            if (idx < MODEL_CAP) {
+                entries[idx].entry.hash = model_random_hash();
+                swtab_insert(&st, &entries[idx].entry,
+                             entries[idx].entry.hash);
+                entries[idx].live = true;
+            }
+            break;
+        }
+        case 3:
+        case 4: {
+            size_t idx = model_find_live(entries,
+                                         model_rng_next() % MODEL_CAP);
+            if (idx < MODEL_CAP) {
+                swtab_remove(&st, &entries[idx].entry,
+                             entries[idx].entry.hash);
+                entries[idx].live = false;
+            }
+            break;
+        }
+        case 5: {
+            struct hashed_entry missing = {
+                .key = -1,
+                .hash = model_random_hash(),
+            };
+            swtab_remove(&st, &missing, missing.hash);
+            break;
+        }
+        case 6:
+        case 7: {
+            swtab_hash_t hash = model_random_hash();
+            size_t idx = model_find_live(entries,
+                                         model_rng_next() % MODEL_CAP);
+            if (idx < MODEL_CAP && (model_rng_next() & 1)) {
+                hash = entries[idx].entry.hash;
+            }
+            model_check_hash(&st, entries, hash);
+            break;
+        }
+        case 8:
+            swtab_reserve(&st, model_rng_next() % (MODEL_CAP * 3));
+            break;
+        case 9:
+            if ((model_rng_next() & 7) == 0) {
+                swtab_clear(&st);
+                for (size_t i = 0; i < MODEL_CAP; i++) {
+                    entries[i].live = false;
+                }
+            } else {
+                model_check_hash(&st, entries, model_random_hash());
+            }
+            break;
+        }
+
+        model_check_all(&st, entries);
+    }
+
+    swtab_destroy(&st);
+}
+
+static void
 test_mixed_operations(void)
 {
     swtab st;
@@ -1026,6 +1273,7 @@ main(void)
     RUN_TEST(test_reuse_tombstone_at_boundary);
     RUN_TEST(test_find_next_no_duplicates);
     RUN_TEST(test_find_next_filters_same_h2);
+    RUN_TEST(test_randomized_reference_model);
     RUN_TEST(test_mixed_operations);
 
     printf("\nAll tests passed.\n");
