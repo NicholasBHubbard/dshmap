@@ -2,7 +2,7 @@ CC      ?= gcc
 CFLAGS  := -O2 -Wall -Wextra -Werror -std=c99
 ASANFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
 
-.PHONY: test test-asan bench coverage clean
+.PHONY: test test-asan test-config-matrix bench coverage clean
 
 test: tests/test.c tests/test_oom.c bench/bench.c dshmap.h
 	$(CC) $(CFLAGS) -o tests/test tests/test.c
@@ -24,6 +24,25 @@ test-asan: tests/test.c tests/test_oom.c dshmap.h
 	./tests/test-small-threshold-asan
 	$(CC) $(CFLAGS) $(ASANFLAGS) -o tests/test-oom-asan tests/test_oom.c
 	./tests/test-oom-asan
+
+test-config-matrix: tests/test.c dshmap.h
+	@set -eu; \
+	for cfg in \
+	    "dense_hashes_off:-DDSHMAP_DENSE_STORE_HASHES=0" \
+	    "swiss_hashes_on:-DDSHMAP_SWISS_STORE_HASHES=1" \
+	    "hash_modes_flipped:-DDSHMAP_DENSE_STORE_HASHES=0 -DDSHMAP_SWISS_STORE_HASHES=1" \
+	    "dense_disabled:-DDSHMAP_DENSE_THRESHOLD=0" \
+	    "tiny_dense:-DDSHMAP_DENSE_THRESHOLD=1" \
+	    "low_load:-DDSHMAP_LOAD_FACTOR_NUM=1 -DDSHMAP_LOAD_FACTOR_DEN=8" \
+	    "half_load:-DDSHMAP_LOAD_FACTOR_NUM=1 -DDSHMAP_LOAD_FACTOR_DEN=2"; \
+	do \
+	    name=$${cfg%%:*}; \
+	    defs=$${cfg#*:}; \
+	    printf 'config %-20s ' "$$name"; \
+	    $(CC) $(CFLAGS) $$defs -o /tmp/dshmap-test-$$name tests/test.c; \
+	    /tmp/dshmap-test-$$name >/dev/null; \
+	    printf 'ok\n'; \
+	done
 
 bench: bench/bench.c dshmap.h
 	$(CC) $(CFLAGS) -o bench/bench bench/bench.c

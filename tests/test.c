@@ -1049,6 +1049,20 @@ test_reserve(void)
 }
 
 static void
+test_reserve_zero_noop(void)
+{
+    dshmap st;
+    dshmap_init(&st, dummy_hash);
+
+    dshmap_reserve(&st, 0);
+    assert(dshmap_size(&st) == 0);
+    assert(dshmap_is_empty(&st));
+    assert(st.slots == NULL);
+
+    dshmap_destroy(&st);
+}
+
+static void
 test_reserve_noop(void)
 {
     dshmap st;
@@ -1063,6 +1077,53 @@ test_reserve_noop(void)
 
     dshmap_reserve(&st, 3);
     assert(st.group_mask == mask);
+
+    dshmap_destroy(&st);
+}
+
+static void
+test_reserve_promotes_dense_table(void)
+{
+    size_t threshold = DSHMAP_DENSE_THRESHOLD;
+    if (threshold == 0) {
+        return;
+    }
+
+    dshmap st;
+    dshmap_init(&st, hashed_entry_hash);
+
+    struct hashed_entry entry = { .key = 1, .hash = 1 };
+    dshmap_insert(&st, &entry, entry.hash);
+    assert(st.dense);
+
+    dshmap_reserve(&st, threshold + 1);
+    assert(!st.dense);
+    assert(dshmap_size(&st) == 1);
+    assert(dshmap_find(&st, entry.hash) == &entry);
+
+    dshmap_destroy(&st);
+}
+
+static void
+test_swiss_reserve_noop_and_growth(void)
+{
+    size_t reserve_n = (size_t)DSHMAP_DENSE_THRESHOLD + 1;
+    if (reserve_n < 16) {
+        reserve_n = 16;
+    }
+
+    dshmap st;
+    dshmap_init(&st, hashed_entry_hash);
+
+    dshmap_reserve(&st, reserve_n);
+    assert(!st.dense);
+
+    size_t old_mask = st.group_mask;
+    dshmap_reserve(&st, 1);
+    assert(st.group_mask == old_mask);
+
+    dshmap_reserve(&st, st.size + st.growth_left + 1);
+    assert(st.group_mask > old_mask);
 
     dshmap_destroy(&st);
 }
@@ -1600,7 +1661,10 @@ main(void)
     RUN_TEST(test_clear);
     RUN_TEST(test_clear_after_tombstone_heavy_table);
     RUN_TEST(test_reserve);
+    RUN_TEST(test_reserve_zero_noop);
     RUN_TEST(test_reserve_noop);
+    RUN_TEST(test_reserve_promotes_dense_table);
+    RUN_TEST(test_swiss_reserve_noop_and_growth);
     RUN_TEST(test_reserve_after_tombstone_churn);
     RUN_TEST(test_growth);
     RUN_TEST(test_large_table);

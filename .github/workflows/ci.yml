@@ -4,13 +4,17 @@ on:
   push:
     branches: [main]
     paths:
-      - 'swtab.h'
+      - 'dshmap.h'
+      - 'Makefile'
+      - 'bench/**'
       - 'tests/**'
       - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'swtab.h'
+      - 'dshmap.h'
+      - 'Makefile'
+      - 'bench/**'
       - 'tests/**'
       - '.github/workflows/ci.yml'
 
@@ -24,6 +28,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run tests
         run: make test CC=${{ matrix.compiler }}
+      - name: Run config matrix
+        run: make test-config-matrix CC=${{ matrix.compiler }}
       - name: Run tests (ASan + UBSan)
         run: make test-asan CC=${{ matrix.compiler }}
 
@@ -35,8 +41,8 @@ jobs:
         run: make coverage
       - name: Check coverage threshold
         run: |
-          pct=$(gcov -r tests/test-cov-test.gcno 2>/dev/null | grep -A1 "File 'swtab.h'" | grep Lines | grep -oP '[\d.]+%' | tr -d '%')
-          echo "swtab.h coverage: ${pct}%"
+          pct=$(gcov -r tests/test-cov-test.gcno 2>/dev/null | grep -A1 "File 'dshmap.h'" | grep Lines | grep -oP '[\d.]+%' | tr -d '%')
+          echo "dshmap.h coverage: ${pct}%"
           if [ "$(echo "$pct < 95" | bc)" -eq 1 ]; then
             echo "FAIL: coverage ${pct}% is below 95% threshold"
             exit 1
