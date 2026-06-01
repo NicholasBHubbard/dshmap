@@ -4,11 +4,14 @@ ASANFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 .PHONY: test test-asan bench coverage clean
 
-test: tests/test.c tests/test_oom.c swtab.h
+test: tests/test.c tests/test_oom.c bench/bench.c swtab.h
 	$(CC) $(CFLAGS) -o tests/test tests/test.c
 	./tests/test
 	$(CC) $(CFLAGS) -o tests/test-oom tests/test_oom.c
 	./tests/test-oom
+	$(CC) $(CFLAGS) -o bench/bench bench/bench.c
+	./bench/bench --compare --sizes 1,2 --ops find_hit,mixed --min-ops 1 --no-perf >/dev/null
+	./bench/bench --csv --linear 1:3 --ops find_miss --min-ops 1 --no-perf >/dev/null
 
 test-asan: tests/test.c tests/test_oom.c swtab.h
 	$(CC) $(CFLAGS) $(ASANFLAGS) -o tests/test-asan tests/test.c
@@ -18,7 +21,7 @@ test-asan: tests/test.c tests/test_oom.c swtab.h
 
 bench: bench/bench.c swtab.h
 	$(CC) $(CFLAGS) -o bench/bench bench/bench.c
-	./bench/bench
+	./bench/bench $(BENCH_ARGS)
 
 coverage: tests/test.c swtab.h
 	$(CC) -O0 -Wall -Wextra -Werror -std=c99 --coverage -o tests/test-cov tests/test.c

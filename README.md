@@ -102,6 +102,12 @@ Run the comparative benchmark (swtab vs chained hash map):
 make bench
 ```
 
+Pass benchmark arguments through `BENCH_ARGS`:
+
+```
+make bench BENCH_ARGS="--compare --geometric 1:65536:2 --ops find_hit,find_miss,mixed"
+```
+
 ## Performance Profile
 
 `swtab` is designed for large, cache-sensitive tables. Its flat layout tends
@@ -119,6 +125,11 @@ All numbers below are from a single machine and will vary by hardware.
 Run `make bench` to reproduce on yours: the benchmark includes hardware
 performance counters (L1/LLC misses, instructions, branch mispredictions)
 when available via `perf_event_open`.
+
+The benchmark can also scan arbitrary table sizes. Use `--linear A:B[:STEP]`
+for every size in a range, `--geometric A:B[:MUL]` for powers, `--sizes`
+for explicit lists, `--ops` to limit operations, `--compare` for a compact
+swtab/chained crossover table, or `--csv` for machine-readable output.
 
 The benchmark compares swtab against a chained hash map (separate chaining
 with linked lists). Adding your own implementation

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -17,11 +18,50 @@
 #define DO_NOT_OPTIMIZE(val) __asm__ volatile("" : "+r"(val) :: "memory")
 #define COMPILER_BARRIER()   __asm__ volatile("" ::: "memory")
 
-#define MIN_TOTAL_OPS 200000
+#define DEFAULT_MIN_TOTAL_OPS 200000
 
 #ifndef PERF_IOC_FLAG_GROUP
 #define PERF_IOC_FLAG_GROUP (1U << 0)
 #endif
+
+enum bench_op {
+    BENCH_INSERT_SEQ = 0,
+    BENCH_INSERT_RND,
+    BENCH_FIND_HIT,
+    BENCH_FIND_MISS,
+    BENCH_REMOVE,
+    BENCH_ITERATE,
+    BENCH_MIXED,
+    BENCH_OP_COUNT,
+};
+
+enum output_mode {
+    OUTPUT_DETAIL = 0,
+    OUTPUT_COMPARE,
+    OUTPUT_CSV,
+};
+
+static const char *bench_op_names[BENCH_OP_COUNT] = {
+    "insert_seq",
+    "insert_rnd",
+    "find_hit",
+    "find_miss",
+    "remove",
+    "iterate",
+    "mixed",
+};
+
+struct bench_options {
+    size_t *sizes;
+    size_t n_sizes;
+    size_t sizes_cap;
+    size_t min_total_ops;
+    uint32_t op_mask;
+    enum output_mode mode;
+    bool use_perf;
+};
+
+static size_t min_total_ops = DEFAULT_MIN_TOTAL_OPS;
 
 /* --- PRNG --- */
 
@@ -152,6 +192,14 @@ perf_group_open(struct perf_group *pg)
 }
 
 static void
+perf_group_init_disabled(struct perf_group *pg)
+{
+    for (int i = 0; i < NUM_HW_COUNTERS; i++)
+        pg->fd[i] = -1;
+    pg->available = false;
+}
+
+static void
 perf_group_close(struct perf_group *pg)
 {
     for (int i = 0; i < NUM_HW_COUNTERS; i++) {
@@ -234,12 +282,30 @@ print_result(const struct bench_result *r, bool have_perf)
     }
 }
 
+static double
+result_ns_per_op(const struct bench_result *r)
+{
+    return (double)r->elapsed_ns / (double)r->n_ops;
+}
+
+static double
+result_counter_per_op(const struct bench_result *r, int counter)
+{
+    return (double)r->counters[counter] / (double)r->n_ops;
+}
+
+static bool
+op_enabled(uint32_t op_mask, enum bench_op op)
+{
+    return (op_mask & (1u << op)) != 0;
+}
+
 /* --- Helpers --- */
 
 static size_t
 calc_iters(size_t n)
 {
-    size_t iters = MIN_TOTAL_OPS / n;
+    size_t iters = min_total_ops / n;
     return iters < 1 ? 1 : iters;
 }
 
@@ -565,7 +631,7 @@ bench_mixed(const bench_impl *impl, size_t n,
     size_t iters = calc_iters(n);
 
     size_t n_ops = n;
-    size_t initial = n / 2;
+    size_t initial = (n + 1) / 2;
     size_t extra = n - initial;
 
     enum { OP_FIND = 0, OP_INSERT = 1, OP_REMOVE = 2 };
@@ -682,20 +748,73 @@ bench_mixed(const bench_impl *impl, size_t n,
     return res;
 }
 
+static struct bench_result
+run_operation(enum bench_op op, const bench_impl *impl, size_t n,
+              const uint64_t *keys, const uint64_t *keys_shuffled,
+              const uint64_t *keys_miss, struct perf_group *pg)
+{
+    switch (op) {
+    case BENCH_INSERT_SEQ:
+        return bench_insert_seq(impl, n, keys, pg);
+    case BENCH_INSERT_RND:
+        return bench_insert_rnd(impl, n, keys_shuffled, pg);
+    case BENCH_FIND_HIT:
+        return bench_find_hit(impl, n, keys, keys_shuffled, pg);
+    case BENCH_FIND_MISS:
+        return bench_find_miss(impl, n, keys, keys_miss, pg);
+    case BENCH_REMOVE:
+        return bench_remove_all(impl, n, keys, keys_shuffled, pg);
+    case BENCH_ITERATE:
+        return bench_iterate(impl, n, keys, pg);
+    case BENCH_MIXED:
+        return bench_mixed(impl, n, keys, pg);
+    case BENCH_OP_COUNT:
+        break;
+    }
+    abort();
+}
+
+static size_t
+measure_memory(const bench_impl *impl, const uint64_t *keys, size_t n)
+{
+    void *ctx = alloc_ctx(impl);
+    populate(impl, ctx, keys, n);
+    size_t mem = impl->memory_usage(ctx);
+    free_ctx(impl, ctx);
+    return mem;
+}
+
 /* --- Driver --- */
 
-struct bench_config {
-    size_t n;
-    const char *label;
-};
+static void
+print_csv_header(void)
+{
+    printf("size,impl,operation,ns_per_op,l1miss_per_op,llcmiss_per_op,"
+           "insn_per_op,brmiss_per_op,memory_bytes,bytes_per_entry\n");
+}
 
 static void
-run_benchmarks(const struct bench_config *cfg,
-               const bench_impl **impls, size_t n_impls,
-               struct perf_group *pg)
+print_csv_result(size_t n, const bench_impl *impl,
+                 const struct bench_result *r, bool have_perf, size_t memory)
 {
-    size_t n = cfg->n;
-    printf("\nTable size: %s\n", cfg->label);
+    printf("%zu,%s,%s,%.3f,", n, impl->name, r->name, result_ns_per_op(r));
+    if (have_perf) {
+        printf("%.3f,%.3f,%.3f,%.3f,",
+               result_counter_per_op(r, CTR_L1D_MISS),
+               result_counter_per_op(r, CTR_LLC_MISS),
+               result_counter_per_op(r, CTR_INSN),
+               result_counter_per_op(r, CTR_BR_MISS));
+    } else {
+        printf(",,,,");
+    }
+    printf("%zu,%.3f\n", memory, (double)memory / (double)n);
+}
+
+static void
+run_benchmarks(size_t n, const bench_impl **impls, size_t n_impls,
+               const struct bench_options *opts, struct perf_group *pg)
+{
+    printf("\nTable size: %zu\n", n);
 
     rng_seed(0xdeadbeefcafe1234ULL ^ n);
 
@@ -717,26 +836,12 @@ run_benchmarks(const struct bench_config *cfg,
 
         struct bench_result r;
 
-        r = bench_insert_seq(impl, n, keys, pg);
-        print_result(&r, pg->available);
-
-        r = bench_insert_rnd(impl, n, keys_shuffled, pg);
-        print_result(&r, pg->available);
-
-        r = bench_find_hit(impl, n, keys, keys_shuffled, pg);
-        print_result(&r, pg->available);
-
-        r = bench_find_miss(impl, n, keys, keys_miss, pg);
-        print_result(&r, pg->available);
-
-        r = bench_remove_all(impl, n, keys, keys_shuffled, pg);
-        print_result(&r, pg->available);
-
-        r = bench_iterate(impl, n, keys, pg);
-        print_result(&r, pg->available);
-
-        r = bench_mixed(impl, n, keys, pg);
-        print_result(&r, pg->available);
+        for (enum bench_op op = 0; op < BENCH_OP_COUNT; op++) {
+            if (!op_enabled(opts->op_mask, op))
+                continue;
+            r = run_operation(op, impl, n, keys, keys_shuffled, keys_miss, pg);
+            print_result(&r, pg->available);
+        }
     }
 
     /* comparative memory */
@@ -751,12 +856,8 @@ run_benchmarks(const struct bench_config *cfg,
     printf("\n");
 
     size_t *mem = malloc(n_impls * sizeof(size_t));
-    for (size_t i = 0; i < n_impls; i++) {
-        void *ctx = alloc_ctx(impls[i]);
-        populate(impls[i], ctx, keys, n);
-        mem[i] = impls[i]->memory_usage(ctx);
-        free_ctx(impls[i], ctx);
-    }
+    for (size_t i = 0; i < n_impls; i++)
+        mem[i] = measure_memory(impls[i], keys, n);
 
     printf("    %-14s", "total");
     for (size_t i = 0; i < n_impls; i++)
@@ -774,33 +875,379 @@ run_benchmarks(const struct bench_config *cfg,
     free(keys_miss);
 }
 
-int
-main(void)
+static void
+run_compare(size_t n, const bench_impl **impls, size_t n_impls,
+            const struct bench_options *opts, struct perf_group *pg)
 {
-    printf("Hash Table Benchmark\n");
-    printf("====================\n");
+    if (n_impls < 2)
+        abort();
+
+    rng_seed(0xdeadbeefcafe1234ULL ^ n);
+
+    uint64_t *keys = malloc(n * sizeof(uint64_t));
+    uint64_t *keys_shuffled = malloc(n * sizeof(uint64_t));
+    uint64_t *keys_miss = malloc(n * sizeof(uint64_t));
+
+    for (size_t i = 0; i < n; i++)
+        keys[i] = rng_next() | 1;
+    memcpy(keys_shuffled, keys, n * sizeof(uint64_t));
+    shuffle_u64(keys_shuffled, n);
+    for (size_t i = 0; i < n; i++)
+        keys_miss[i] = rng_next() | 1;
+
+    for (enum bench_op op = 0; op < BENCH_OP_COUNT; op++) {
+        if (!op_enabled(opts->op_mask, op))
+            continue;
+
+        struct bench_result swtab = run_operation(op, impls[0], n, keys,
+                                                  keys_shuffled, keys_miss, pg);
+        struct bench_result chained = run_operation(op, impls[1], n, keys,
+                                                    keys_shuffled, keys_miss, pg);
+        double swtab_ns = result_ns_per_op(&swtab);
+        double chained_ns = result_ns_per_op(&chained);
+        const char *winner = swtab_ns < chained_ns ? impls[0]->name : impls[1]->name;
+        printf("%8zu %-12s %10.3f %10.3f %8.3f %8s\n",
+               n, bench_op_names[op], swtab_ns, chained_ns,
+               swtab_ns / chained_ns, winner);
+    }
+
+    free(keys);
+    free(keys_shuffled);
+    free(keys_miss);
+}
+
+static void
+run_csv(size_t n, const bench_impl **impls, size_t n_impls,
+        const struct bench_options *opts, struct perf_group *pg)
+{
+    rng_seed(0xdeadbeefcafe1234ULL ^ n);
+
+    uint64_t *keys = malloc(n * sizeof(uint64_t));
+    uint64_t *keys_shuffled = malloc(n * sizeof(uint64_t));
+    uint64_t *keys_miss = malloc(n * sizeof(uint64_t));
+
+    for (size_t i = 0; i < n; i++)
+        keys[i] = rng_next() | 1;
+    memcpy(keys_shuffled, keys, n * sizeof(uint64_t));
+    shuffle_u64(keys_shuffled, n);
+    for (size_t i = 0; i < n; i++)
+        keys_miss[i] = rng_next() | 1;
+
+    for (size_t impl_i = 0; impl_i < n_impls; impl_i++) {
+        const bench_impl *impl = impls[impl_i];
+        size_t memory = measure_memory(impl, keys, n);
+        for (enum bench_op op = 0; op < BENCH_OP_COUNT; op++) {
+            if (!op_enabled(opts->op_mask, op))
+                continue;
+            struct bench_result r = run_operation(op, impl, n, keys,
+                                                  keys_shuffled, keys_miss, pg);
+            print_csv_result(n, impl, &r, pg->available, memory);
+        }
+    }
+
+    free(keys);
+    free(keys_shuffled);
+    free(keys_miss);
+}
+
+static void
+usage(const char *prog, FILE *out)
+{
+    fprintf(out,
+            "usage: %s [options]\n"
+            "\n"
+            "Options:\n"
+            "  --sizes LIST          comma-separated sizes, e.g. 1,2,4,8,16\n"
+            "  --linear A:B[:STEP]   add every STEP sizes from A through B\n"
+            "  --geometric A:B[:MUL] add sizes A, A*MUL, ... through B\n"
+            "  --ops LIST            comma-separated operations or all\n"
+            "  --compare             print compact swtab/chained comparison\n"
+            "  --csv                 print machine-readable CSV rows\n"
+            "  --min-ops N           target at least N operations per benchmark\n"
+            "  --no-perf             skip hardware performance counters\n"
+            "  --help                show this help\n"
+            "\n"
+            "Operations: insert_seq, insert_rnd, find_hit, find_miss, "
+            "remove, iterate, mixed\n",
+            prog);
+}
+
+static void
+die_usage(const char *prog, const char *msg)
+{
+    fprintf(stderr, "bench: %s\n\n", msg);
+    usage(prog, stderr);
+    exit(2);
+}
+
+static bool
+parse_size_value(const char *s, size_t *out)
+{
+    char *end;
+    errno = 0;
+    unsigned long long v = strtoull(s, &end, 0);
+    if (errno || end == s || *end != '\0' || v == 0 ||
+        v > (unsigned long long)SIZE_MAX) {
+        return false;
+    }
+    *out = (size_t)v;
+    return true;
+}
+
+static void
+add_size(struct bench_options *opts, size_t n)
+{
+    if (opts->n_sizes == opts->sizes_cap) {
+        size_t new_cap = opts->sizes_cap ? opts->sizes_cap * 2 : 16;
+        size_t *new_sizes = realloc(opts->sizes, new_cap * sizeof(size_t));
+        if (!new_sizes) {
+            fprintf(stderr, "bench: out of memory\n");
+            exit(1);
+        }
+        opts->sizes = new_sizes;
+        opts->sizes_cap = new_cap;
+    }
+    opts->sizes[opts->n_sizes++] = n;
+}
+
+static void
+add_default_sizes(struct bench_options *opts)
+{
+    static const size_t defaults[] = { 64, 1024, 65536, 1048576 };
+    for (size_t i = 0; i < sizeof(defaults) / sizeof(defaults[0]); i++)
+        add_size(opts, defaults[i]);
+}
+
+static void
+parse_sizes(const char *prog, struct bench_options *opts, const char *arg)
+{
+    char *copy = malloc(strlen(arg) + 1);
+    if (!copy) {
+        fprintf(stderr, "bench: out of memory\n");
+        exit(1);
+    }
+    strcpy(copy, arg);
+
+    char *save = NULL;
+    for (char *tok = strtok_r(copy, ",", &save); tok;
+         tok = strtok_r(NULL, ",", &save)) {
+        size_t n;
+        if (!parse_size_value(tok, &n))
+            die_usage(prog, "invalid --sizes value");
+        add_size(opts, n);
+    }
+
+    free(copy);
+}
+
+static void
+parse_range(const char *prog, const char *arg,
+            size_t *start, size_t *end, size_t *step)
+{
+    char *copy = malloc(strlen(arg) + 1);
+    if (!copy) {
+        fprintf(stderr, "bench: out of memory\n");
+        exit(1);
+    }
+    strcpy(copy, arg);
+
+    char *second = strchr(copy, ':');
+    if (!second)
+        die_usage(prog, "range must be A:B or A:B:STEP");
+    *second++ = '\0';
+
+    char *third = strchr(second, ':');
+    if (third)
+        *third++ = '\0';
+
+    if (!parse_size_value(copy, start) ||
+        !parse_size_value(second, end) ||
+        (third && !parse_size_value(third, step))) {
+        die_usage(prog, "invalid range value");
+    }
+    if (!third)
+        *step = 0;
+    if (*end < *start)
+        die_usage(prog, "range end must be >= start");
+
+    free(copy);
+}
+
+static void
+parse_linear(const char *prog, struct bench_options *opts, const char *arg)
+{
+    size_t start, end, step;
+    parse_range(prog, arg, &start, &end, &step);
+    if (step == 0)
+        step = 1;
+
+    for (size_t n = start; n <= end; ) {
+        add_size(opts, n);
+        if (end - n < step)
+            break;
+        n += step;
+    }
+}
+
+static void
+parse_geometric(const char *prog, struct bench_options *opts, const char *arg)
+{
+    size_t start, end, mul;
+    parse_range(prog, arg, &start, &end, &mul);
+    if (mul == 0)
+        mul = 2;
+    if (mul < 2)
+        die_usage(prog, "geometric multiplier must be >= 2");
+
+    for (size_t n = start; n <= end; ) {
+        add_size(opts, n);
+        if (n > end / mul)
+            break;
+        n *= mul;
+    }
+}
+
+static bool
+parse_op_name(const char *name, enum bench_op *op)
+{
+    for (enum bench_op i = 0; i < BENCH_OP_COUNT; i++) {
+        if (strcmp(name, bench_op_names[i]) == 0) {
+            *op = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void
+parse_ops(const char *prog, struct bench_options *opts, const char *arg)
+{
+    if (strcmp(arg, "all") == 0) {
+        opts->op_mask = (1u << BENCH_OP_COUNT) - 1;
+        return;
+    }
+
+    char *copy = malloc(strlen(arg) + 1);
+    if (!copy) {
+        fprintf(stderr, "bench: out of memory\n");
+        exit(1);
+    }
+    strcpy(copy, arg);
+
+    opts->op_mask = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(copy, ",", &save); tok;
+         tok = strtok_r(NULL, ",", &save)) {
+        enum bench_op op;
+        if (!parse_op_name(tok, &op))
+            die_usage(prog, "invalid operation name");
+        opts->op_mask |= 1u << op;
+    }
+    if (opts->op_mask == 0)
+        die_usage(prog, "--ops must name at least one operation");
+
+    free(copy);
+}
+
+static void
+parse_args(int argc, char **argv, struct bench_options *opts)
+{
+    opts->sizes = NULL;
+    opts->n_sizes = 0;
+    opts->sizes_cap = 0;
+    opts->min_total_ops = DEFAULT_MIN_TOTAL_OPS;
+    opts->op_mask = (1u << BENCH_OP_COUNT) - 1;
+    opts->mode = OUTPUT_DETAIL;
+    opts->use_perf = true;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0) {
+            usage(argv[0], stdout);
+            exit(0);
+        } else if (strcmp(argv[i], "--sizes") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--sizes requires an argument");
+            parse_sizes(argv[0], opts, argv[i]);
+        } else if (strcmp(argv[i], "--linear") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--linear requires an argument");
+            parse_linear(argv[0], opts, argv[i]);
+        } else if (strcmp(argv[i], "--geometric") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--geometric requires an argument");
+            parse_geometric(argv[0], opts, argv[i]);
+        } else if (strcmp(argv[i], "--ops") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--ops requires an argument");
+            parse_ops(argv[0], opts, argv[i]);
+        } else if (strcmp(argv[i], "--compare") == 0) {
+            opts->mode = OUTPUT_COMPARE;
+        } else if (strcmp(argv[i], "--csv") == 0) {
+            opts->mode = OUTPUT_CSV;
+        } else if (strcmp(argv[i], "--min-ops") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--min-ops requires an argument");
+            if (!parse_size_value(argv[i], &opts->min_total_ops))
+                die_usage(argv[0], "invalid --min-ops value");
+        } else if (strcmp(argv[i], "--no-perf") == 0) {
+            opts->use_perf = false;
+        } else {
+            die_usage(argv[0], "unknown option");
+        }
+    }
+
+    if (opts->n_sizes == 0)
+        add_default_sizes(opts);
+}
+
+int
+main(int argc, char **argv)
+{
+    struct bench_options opts;
+    parse_args(argc, argv, &opts);
+    min_total_ops = opts.min_total_ops;
+
+    if (opts.mode != OUTPUT_CSV) {
+        printf("Hash Table Benchmark\n");
+        printf("====================\n");
+    }
 
     struct perf_group pg;
-    perf_group_open(&pg);
+    if (opts.use_perf)
+        perf_group_open(&pg);
+    else
+        perf_group_init_disabled(&pg);
 
-    if (!pg.available)
+    if (opts.mode != OUTPUT_CSV && opts.use_perf && !pg.available)
         printf("\nNOTE: Hardware perf counters unavailable; "
                "reporting wall time only.\n");
 
     const bench_impl *impls[] = { &impl_swtab, &impl_chained };
     size_t n_impls = sizeof(impls) / sizeof(impls[0]);
 
-    static const struct bench_config configs[] = {
-        {      64, "64 (L1-resident)"    },
-        {    1024, "1024 (L2-resident)"   },
-        {   65536, "65536 (L3-resident)"  },
-        { 1048576, "1048576 (exceeds L3)" },
-    };
+    if (opts.mode == OUTPUT_COMPARE) {
+        printf("\n%8s %-12s %10s %10s %8s %8s\n",
+               "size", "operation", "swtab", "chained", "ratio", "winner");
+        printf("%8s %-12s %10s %10s %8s %8s\n",
+               "--------", "------------", "----------", "----------",
+               "--------", "--------");
+    } else if (opts.mode == OUTPUT_CSV) {
+        print_csv_header();
+    }
 
-    for (size_t i = 0; i < sizeof(configs) / sizeof(configs[0]); i++)
-        run_benchmarks(&configs[i], impls, n_impls, &pg);
+    for (size_t i = 0; i < opts.n_sizes; i++) {
+        if (opts.mode == OUTPUT_DETAIL) {
+            run_benchmarks(opts.sizes[i], impls, n_impls, &opts, &pg);
+        } else if (opts.mode == OUTPUT_COMPARE) {
+            run_compare(opts.sizes[i], impls, n_impls, &opts, &pg);
+        } else {
+            run_csv(opts.sizes[i], impls, n_impls, &opts, &pg);
+        }
+    }
 
-    printf("\n");
+    if (opts.mode != OUTPUT_CSV)
+        printf("\n");
     perf_group_close(&pg);
+    free(opts.sizes);
     return 0;
 }
