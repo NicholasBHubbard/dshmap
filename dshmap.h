@@ -668,6 +668,25 @@ dshmap__dense_alloc(dshmap *map, size_t cap)
 }
 
 static inline void
+dshmap__swiss_insert_no_grow(dshmap *map, void *entry, dshmap_hash_t hash)
+{
+    uint8_t h2 = dshmap__h2(hash);
+
+    DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
+        uint64_t empty = dshmap__group_has_empty(ctrl);
+        if (DSHMAP__LIKELY(empty)) {
+            size_t pos = dshmap__slot_pos(index, dshmap__match_slot(empty));
+            map->ctrl[pos] = (int8_t)h2;
+            dshmap__set_slot_hash(map, pos, hash);
+            map->slots[pos] = entry;
+            map->size++;
+            map->growth_left--;
+            return;
+        }
+    }
+}
+
+static inline void
 dshmap__swiss_grow_to(dshmap *map, size_t new_groups)
 {
     size_t old_groups = dshmap__checked_add(map->group_mask, 1);
@@ -694,7 +713,7 @@ dshmap__swiss_grow_to(dshmap *map, size_t new_groups)
                 size_t pos = dshmap__slot_pos(g, dshmap__ctrl_next_match(&occ));
                 dshmap_hash_t hash = old_hashes != NULL ?
                     old_hashes[pos] : map->hash_fn(old_slots[pos]);
-                dshmap_insert(map, old_slots[pos], hash);
+                dshmap__swiss_insert_no_grow(map, old_slots[pos], hash);
             }
         }
         DSHMAP_FREE(old_ctrl);
@@ -774,7 +793,7 @@ dshmap__promote_to_swiss(dshmap *map, size_t count)
         if (old_ctrl[i] != DSHMAP__EMPTY) {
             dshmap_hash_t hash = old_hashes != NULL ?
                 old_hashes[i] : map->hash_fn(old_slots[i]);
-            dshmap_insert(map, old_slots[i], hash);
+            dshmap__swiss_insert_no_grow(map, old_slots[i], hash);
         }
     }
     DSHMAP_FREE(old_ctrl);
@@ -954,7 +973,7 @@ dshmap_insert(dshmap *map, void *entry, dshmap_hash_t hash)
         size_t count = dshmap__checked_add(map->size, 1);
         if (DSHMAP__UNLIKELY(count > DSHMAP_DENSE_THRESHOLD)) {
             dshmap__promote_to_swiss(map, count);
-            dshmap__swiss_insert(map, entry, hash);
+            dshmap__swiss_insert_no_grow(map, entry, hash);
         } else {
             if (DSHMAP__UNLIKELY(map->growth_left == 0)) {
                 dshmap__dense_grow_for_count(map, count);
