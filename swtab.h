@@ -410,6 +410,12 @@ swtab__group_has_empty(uint64_t ctrl)
     return (ctrl & ~(ctrl << 1)) & SWTAB__HIGH_BITS;
 }
 
+static inline bool
+swtab__is_allocated(const swtab *st)
+{
+    return st->slots != NULL;
+}
+
 static inline void
 swtab__oom(void)
 {
@@ -480,7 +486,7 @@ swtab__grow_to(swtab *st, size_t new_groups)
     size_t old_cap = swtab__capacity_from_groups(old_groups);
     int8_t *old_ctrl = st->ctrl;
     void **old_slots = st->slots;
-    bool was_empty = (st->ctrl == swtab__empty_ctrl);
+    bool was_allocated = swtab__is_allocated(st);
 
     size_t new_cap = swtab__capacity_from_groups(new_groups);
 
@@ -489,7 +495,7 @@ swtab__grow_to(swtab *st, size_t new_groups)
     st->size = 0;
     st->growth_left = swtab__growth_left_for_cap(new_cap);
 
-    if (!was_empty) {
+    if (was_allocated) {
         size_t old_groups_n = old_cap / 8;
         for (size_t g = 0; g < old_groups_n; g++) {
             uint64_t ctrl;
@@ -507,9 +513,9 @@ swtab__grow_to(swtab *st, size_t new_groups)
 static inline void
 swtab__grow(swtab *st)
 {
-    bool was_empty = (st->ctrl == swtab__empty_ctrl);
+    bool was_allocated = swtab__is_allocated(st);
     size_t new_groups;
-    if (was_empty) {
+    if (!was_allocated) {
         new_groups = 1;
     } else {
         size_t old_groups = swtab__checked_add(st->group_mask, 1);
@@ -536,7 +542,7 @@ swtab_init(swtab *st, swtab_hash_fn hash_fn)
 static inline void
 swtab_destroy(swtab *st)
 {
-    if (st->ctrl != swtab__empty_ctrl) {
+    if (swtab__is_allocated(st)) {
         SWTAB_FREE(st->ctrl);
     }
     swtab_hash_fn fn = st->hash_fn;
@@ -558,7 +564,7 @@ swtab_is_empty(const swtab *st)
 static inline void
 swtab_clear(swtab *st)
 {
-    if (st->ctrl != swtab__empty_ctrl) {
+    if (swtab__is_allocated(st)) {
         size_t cap = swtab__capacity_from_groups(
             swtab__checked_add(st->group_mask, 1));
         memset(st->ctrl, SWTAB__EMPTY, cap);
@@ -574,9 +580,9 @@ swtab_reserve(swtab *st, size_t count)
         return;
     }
 
-    bool was_empty = (st->ctrl == swtab__empty_ctrl);
+    bool was_allocated = swtab__is_allocated(st);
     size_t new_groups;
-    if (was_empty) {
+    if (!was_allocated) {
         new_groups = 1;
     } else {
         new_groups = swtab__checked_mul(
