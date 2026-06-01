@@ -1,14 +1,15 @@
 # swtab
 
-swtab is a header-only C99 swiss table hash map.
+swtab is a header-only C99 dense-to-swiss hash map.
 
 ## Features
 
-- **Scale-oriented**: flat Swiss-table layout reduces pointer chasing and cache misses; the largest wins show up on large tables, especially misses, removes, iteration, and memory use ([see benchmarks](#benchmarks))
+- **Hybrid layout**: small tables use a dense open-addressed layout, then promote to the Swiss-table layout after `SWTAB_DENSE_THRESHOLD` entries
+- **Scale-oriented**: flat layouts reduce pointer chasing and cache misses; the largest Swiss-table wins show up on large tables, especially misses, removes, iteration, and memory use ([see benchmarks](#benchmarks))
 - **Cache-friendly**: contiguous control bytes and slots improve locality compared with pointer-heavy tables
 - **Header-only**: single file, no build system integration, no dependencies beyond the C standard library
 - **Generic**: stores caller-owned non-`NULL` `void *` entries; each entry pointer may be present at most once
-- **Small**: ~9 bytes/entry overhead at typical load factors
+- **Small**: ~9 bytes/entry overhead in Swiss mode at typical load factors
 
 ## Usage
 
@@ -70,6 +71,23 @@ Full documentation is in `swtab.h`.
 `NULL` entries are not supported. `swtab` uses `NULL` as the lookup miss result
 and as an iteration sentinel.
 
+Define `SWTAB_DENSE_THRESHOLD` before including `swtab.h` to tune the hybrid
+cutover. The default is `2048`. Define it as `0` to disable dense mode and use
+the Swiss layout from the first insertion.
+
+Hash caching is independently configurable per layout:
+
+```c
+#define SWTAB_DENSE_STORE_HASHES 1
+#define SWTAB_SWISS_STORE_HASHES 0
+#include "swtab.h"
+```
+
+Those are the defaults. Disabling hash storage saves memory but recomputes
+hashes during some lookups, removals, and resizes. Enabling Swiss hash storage
+adds one `swtab_hash_t` per slot and can help when hash functions are expensive
+or collision-heavy lookups are common.
+
 ## Allocation Failure
 
 Allocation failure is fatal by default. If allocation fails, or if size
@@ -114,9 +132,10 @@ make bench BENCH_ARGS="--compare --geometric 1:65536:2 --ops find_hit,find_miss,
 `swtab` is designed for large, cache-sensitive tables. Its flat layout tends
 to pay off once pointer chasing and cache misses dominate.
 
-For small tables, it is not guaranteed to beat simpler hash maps. Function
-pointer hashing, control-byte probing, and Swiss-table bookkeeping can cost
-more than a simple chained table or linear structure at small sizes.
+Dense mode reduces small-table overhead, especially for inserts, removes, and
+mixed workloads. It still is not guaranteed to beat simpler hash maps: direct
+hit lookups and iteration can remain faster in a simple chained table or
+linear structure at small sizes.
 
 Benchmark with your workload if small-table latency matters.
 

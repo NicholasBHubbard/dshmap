@@ -12,6 +12,21 @@ dummy_hash(const void *entry)
     return (swtab_hash_t)entry;
 }
 
+static size_t
+fill_until_growth_left_zero(swtab *st, size_t next)
+{
+    for (;;) {
+        size_t target = swtab_size(st) + st->growth_left;
+        while (next <= target) {
+            swtab_insert(st, (void *)next, dummy_hash((void *)next));
+            next++;
+        }
+        if (st->growth_left == 0) {
+            return next;
+        }
+    }
+}
+
 static void
 test_lifecycle(void)
 {
@@ -361,7 +376,9 @@ test_tombstone_preserves_probe_chain(void)
     swtab st;
     swtab_init(&st, hashed_entry_hash);
     swtab_reserve(&st, 14);
-    assert(st.group_mask == 1);
+    if (!st.dense) {
+        assert(st.group_mask == 1);
+    }
 
     struct hashed_entry entries[9];
     for (size_t i = 0; i < 9; i++) {
@@ -390,7 +407,9 @@ test_probe_wraparound(void)
     swtab st;
     swtab_init(&st, hashed_entry_hash);
     swtab_reserve(&st, 28);
-    assert(st.group_mask == 3);
+    if (!st.dense) {
+        assert(st.group_mask == 3);
+    }
 
     struct hashed_entry entries[9];
     for (size_t i = 0; i < 9; i++) {
@@ -423,7 +442,9 @@ test_reuse_deep_tombstone_before_grow(void)
     swtab st;
     swtab_init(&st, hashed_entry_hash);
     swtab_reserve(&st, 28);
-    assert(st.group_mask == 3);
+    if (!st.dense) {
+        assert(st.group_mask == 3);
+    }
 
     struct hashed_entry entries[29];
     for (size_t i = 0; i < 28; i++) {
@@ -432,11 +453,15 @@ test_reuse_deep_tombstone_before_grow(void)
         swtab_insert(&st, &entries[i], entries[i].hash);
     }
     assert(swtab_size(&st) == 28);
-    assert(st.growth_left == 0);
+    if (!st.dense) {
+        assert(st.growth_left == 0);
+    }
 
     swtab_remove(&st, &entries[10], entries[10].hash);
     assert(swtab_find(&st, entries[10].hash) == NULL);
-    assert(st.growth_left == 0);
+    if (!st.dense) {
+        assert(st.growth_left == 0);
+    }
 
     size_t mask = st.group_mask;
     entries[28].key = 28;
@@ -569,6 +594,195 @@ test_find_key_skips_same_h2_noise(void)
 
     key = 99;
     assert(swtab_find_key(&st, target_hash, &key, hashed_entry_eq) == NULL);
+
+    swtab_destroy(&st);
+}
+
+static void
+test_dense_hash_storage_policy(void)
+{
+    size_t threshold = SWTAB_DENSE_THRESHOLD;
+    if (threshold == 0) {
+        return;
+    }
+
+    swtab st;
+    swtab_init(&st, counted_entry_hash);
+
+    struct counted_entry entries[8];
+    size_t n = threshold < 8 ? threshold : 8;
+    for (size_t i = 0; i < n; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (swtab_hash_t)(i * 17 + 1);
+        swtab_insert(&st, &entries[i], entries[i].hash);
+    }
+
+#if SWTAB_DENSE_STORE_HASHES
+    assert(st.hashes != NULL);
+#else
+    assert(st.hashes == NULL);
+#endif
+    assert(st.dense);
+    counted_hash_calls = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        assert(swtab_find(&st, entries[i].hash) == &entries[i]);
+    }
+    assert(swtab_find(&st, 999999) == NULL);
+#if SWTAB_DENSE_STORE_HASHES
+    assert(counted_hash_calls == 0);
+#else
+    assert(counted_hash_calls > 0);
+#endif
+
+    swtab_destroy(&st);
+}
+
+static void
+test_dense_remove_backshifts_cluster(void)
+{
+    size_t threshold = SWTAB_DENSE_THRESHOLD;
+    if (threshold < 8) {
+        return;
+    }
+
+    swtab st;
+    swtab_init(&st, hashed_entry_hash);
+
+    struct hashed_entry entries[8];
+    for (size_t i = 0; i < 8; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (swtab_hash_t)(i * 8 + 1);
+        swtab_insert(&st, &entries[i], entries[i].hash);
+    }
+
+    assert(st.dense);
+
+    swtab_remove(&st, &entries[0], entries[0].hash);
+    assert(swtab_find(&st, entries[0].hash) == NULL);
+    for (size_t i = 1; i < 8; i++) {
+        assert(swtab_find(&st, entries[i].hash) == &entries[i]);
+    }
+
+    struct hashed_entry extra = { .key = 99, .hash = (swtab_hash_t)(99 * 8 + 1) };
+    swtab_insert(&st, &extra, extra.hash);
+    assert(swtab_find(&st, extra.hash) == &extra);
+    assert(swtab_size(&st) == 8);
+
+    swtab_destroy(&st);
+}
+
+static void
+test_dense_promotes_to_swiss_at_threshold(void)
+{
+    size_t threshold = SWTAB_DENSE_THRESHOLD;
+    if (threshold == 0) {
+        return;
+    }
+
+    swtab st;
+    swtab_init(&st, hashed_entry_hash);
+
+    size_t n = threshold + 1;
+    struct hashed_entry *entries = malloc(n * sizeof(*entries));
+    assert(entries != NULL);
+
+    for (size_t i = 0; i < threshold; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (swtab_hash_t)(i * 2654435761u + 1);
+        swtab_insert(&st, &entries[i], entries[i].hash);
+        assert(st.dense);
+    }
+
+    entries[threshold].key = (int)threshold;
+    entries[threshold].hash = (swtab_hash_t)(threshold * 2654435761u + 1);
+    swtab_insert(&st, &entries[threshold], entries[threshold].hash);
+
+    assert(!st.dense);
+#if SWTAB_SWISS_STORE_HASHES
+    assert(st.hashes != NULL);
+#else
+    assert(st.hashes == NULL);
+#endif
+    assert(swtab_size(&st) == n);
+    for (size_t i = 0; i < n; i++) {
+        assert(swtab_find(&st, entries[i].hash) == &entries[i]);
+    }
+
+    free(entries);
+    swtab_destroy(&st);
+}
+
+static void
+test_reserve_above_dense_threshold_uses_swiss(void)
+{
+    size_t threshold = SWTAB_DENSE_THRESHOLD;
+    if (threshold == 0) {
+        return;
+    }
+
+    swtab st;
+    swtab_init(&st, hashed_entry_hash);
+
+    swtab_reserve(&st, threshold + 1);
+    assert(st.slots != NULL);
+    assert(!st.dense);
+#if SWTAB_SWISS_STORE_HASHES
+    assert(st.hashes != NULL);
+#else
+    assert(st.hashes == NULL);
+#endif
+
+    struct hashed_entry entries[16];
+    for (size_t i = 0; i < 16; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (swtab_hash_t)(i + 1);
+        swtab_insert(&st, &entries[i], entries[i].hash);
+    }
+
+    for (size_t i = 0; i < 16; i++) {
+        assert(swtab_find(&st, entries[i].hash) == &entries[i]);
+    }
+
+    swtab_destroy(&st);
+}
+
+static void
+test_swiss_hash_storage_policy(void)
+{
+    swtab st;
+    swtab_init(&st, counted_entry_hash);
+
+    size_t reserve_n = (size_t)SWTAB_DENSE_THRESHOLD + 1;
+    if (reserve_n < 16) {
+        reserve_n = 16;
+    }
+    swtab_reserve(&st, reserve_n);
+
+    assert(st.slots != NULL);
+    assert(!st.dense);
+#if SWTAB_SWISS_STORE_HASHES
+    assert(st.hashes != NULL);
+#else
+    assert(st.hashes == NULL);
+#endif
+
+    struct counted_entry entries[8];
+    for (size_t i = 0; i < 8; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (swtab_hash_t)(i * 17 + 1);
+        swtab_insert(&st, &entries[i], entries[i].hash);
+    }
+
+    counted_hash_calls = 0;
+    for (size_t i = 0; i < 8; i++) {
+        assert(swtab_find(&st, entries[i].hash) == &entries[i]);
+    }
+#if SWTAB_SWISS_STORE_HASHES
+    assert(counted_hash_calls == 0);
+#else
+    assert(counted_hash_calls > 0);
+#endif
 
     swtab_destroy(&st);
 }
@@ -992,19 +1206,13 @@ test_load_factor_boundary(void)
     swtab_init(&st, dummy_hash);
 
     swtab_insert(&st, (void *)1, dummy_hash((void *)1));
-    assert(st.group_mask == 0);
-    size_t cap = (st.group_mask + 1) * 8;
-    size_t threshold = cap * SWTAB_LOAD_FACTOR_NUM / SWTAB_LOAD_FACTOR_DEN;
+    size_t next = fill_until_growth_left_zero(&st, 2);
+    size_t mask = st.group_mask;
 
-    for (size_t i = 2; i <= threshold; i++) {
-        swtab_insert(&st, (void *)i, dummy_hash((void *)i));
-    }
-    assert(st.group_mask == 0);
+    swtab_insert(&st, (void *)next, dummy_hash((void *)next));
+    assert(st.group_mask > mask);
 
-    swtab_insert(&st, (void *)(threshold + 1), dummy_hash((void *)(threshold + 1)));
-    assert(st.group_mask > 0);
-
-    for (size_t i = 1; i <= threshold + 1; i++) {
+    for (size_t i = 1; i <= next; i++) {
         assert(swtab_find(&st, dummy_hash((void *)i)) == (void *)i);
     }
 
@@ -1018,23 +1226,18 @@ test_remove_empty_slot_restores_growth(void)
     swtab_init(&st, dummy_hash);
 
     swtab_insert(&st, (void *)1, dummy_hash((void *)1));
-    assert(st.group_mask == 0);
-    size_t threshold = ((st.group_mask + 1) * 8) *
-                       SWTAB_LOAD_FACTOR_NUM / SWTAB_LOAD_FACTOR_DEN;
-
-    for (size_t i = 2; i <= threshold; i++) {
-        swtab_insert(&st, (void *)i, dummy_hash((void *)i));
-    }
-    assert(st.group_mask == 0);
+    size_t next = fill_until_growth_left_zero(&st, 2);
+    size_t mask = st.group_mask;
+    size_t last = next - 1;
     assert(st.growth_left == 0);
 
-    swtab_remove(&st, (void *)threshold, dummy_hash((void *)threshold));
+    swtab_remove(&st, (void *)last, dummy_hash((void *)last));
     assert(st.growth_left == 1);
 
     swtab_insert(&st, (void *)100, dummy_hash((void *)100));
-    assert(st.group_mask == 0);
+    assert(st.group_mask == mask);
     assert(st.growth_left == 0);
-    assert(swtab_size(&st) == threshold);
+    assert(swtab_size(&st) == last);
     assert(swtab_find(&st, dummy_hash((void *)100)) == (void *)100);
 
     swtab_destroy(&st);
@@ -1047,7 +1250,9 @@ test_reuse_tombstone_at_boundary(void)
     swtab_init(&st, dummy_hash);
 
     swtab_reserve(&st, 14);
-    assert(st.group_mask == 1);
+    if (!st.dense) {
+        assert(st.group_mask == 1);
+    }
 
     for (size_t i = 1; i <= 8; i++) {
         swtab_insert(&st, (void *)i, dummy_hash((void *)i));
@@ -1056,15 +1261,21 @@ test_reuse_tombstone_at_boundary(void)
         swtab_insert(&st, (void *)i, dummy_hash((void *)i));
     }
     assert(swtab_size(&st) == 14);
-    assert(st.growth_left == 0);
+    if (!st.dense) {
+        assert(st.growth_left == 0);
+    }
 
     swtab_remove(&st, (void *)1, dummy_hash((void *)1));
-    assert(st.group_mask == 1);
-    assert(st.growth_left == 0);
+    if (!st.dense) {
+        assert(st.group_mask == 1);
+        assert(st.growth_left == 0);
+    }
 
     swtab_insert(&st, (void *)9, dummy_hash((void *)9));
-    assert(st.group_mask == 1);
-    assert(st.growth_left == 0);
+    if (!st.dense) {
+        assert(st.group_mask == 1);
+        assert(st.growth_left == 0);
+    }
     assert(swtab_size(&st) == 14);
     assert(swtab_find(&st, dummy_hash((void *)9)) == (void *)9);
 
@@ -1251,6 +1462,11 @@ main(void)
     RUN_TEST(test_find_key_next);
     RUN_TEST(test_find_key_does_not_rehash_candidates);
     RUN_TEST(test_find_key_skips_same_h2_noise);
+    RUN_TEST(test_dense_hash_storage_policy);
+    RUN_TEST(test_dense_remove_backshifts_cluster);
+    RUN_TEST(test_dense_promotes_to_swiss_at_threshold);
+    RUN_TEST(test_reserve_above_dense_threshold_uses_swiss);
+    RUN_TEST(test_swiss_hash_storage_policy);
     RUN_TEST(test_remove);
     RUN_TEST(test_clear);
     RUN_TEST(test_clear_after_tombstone_heavy_table);

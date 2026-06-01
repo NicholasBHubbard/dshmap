@@ -65,8 +65,14 @@ static size_t
 impl_swtab_memory_usage(const void *ctx)
 {
     const swtab *st = (const swtab *)ctx;
+    if (st->slots == NULL)
+        return 0;
+
     size_t capacity = (st->group_mask + 1) * 8;
-    return capacity * (1 + sizeof(void *));
+    size_t bytes = capacity * (1 + sizeof(void *));
+    if (st->hashes != NULL)
+        bytes += capacity * sizeof(swtab_hash_t);
+    return bytes;
 }
 
 static const bench_impl impl_swtab = {
