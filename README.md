@@ -227,6 +227,13 @@ The `ptr` workload is the original integer-as-pointer benchmark; `string`
 uses fixed string entries; `expensive` uses the same entries with a
 deliberately expensive hash function.
 
+The `mixed` workload is configurable. Use `--mixed-ratio F,I,R` to set
+find/insert/remove percentages, `--mixed-initial PCT` to set the starting fill
+percentage, `--mixed-iter-scans N` to set the target number of full-table
+scans, and `--mixed-seed N` to choose a repeatable operation sequence. The
+default is `--mixed-ratio 70,20,10 --mixed-initial 50 --mixed-iter-scans 8`.
+`--mixed-iter-scans 0` disables iteration inside `mixed`.
+
 The benchmark compares dshmap against every implementation registered in
 `impls[]` in `bench/bench.c`. The current set includes a chained hash map,
 a packed linear table, and a flat open-addressed table. The chained baseline
@@ -269,9 +276,9 @@ entry visited.
 | 64 | small | `iterate` | chained | 2.0 | 1.7 | 1.180 | chained |
 | 64 | small | `iterate` | packed | 2.0 | 1.0 | 1.953 | packed |
 | 64 | small | `iterate` | flat | 2.0 | 2.2 | 0.884 | dshmap |
-| 64 | small | `mixed` | chained | 3.3 | 2.8 | 1.161 | chained |
-| 64 | small | `mixed` | packed | 3.3 | 5.2 | 0.625 | dshmap |
-| 64 | small | `mixed` | flat | 3.3 | 3.5 | 0.942 | dshmap |
+| 64 | small | `mixed` | chained | 4.3 | 3.8 | 1.141 | chained |
+| 64 | small | `mixed` | packed | 4.3 | 3.2 | 1.351 | packed |
+| 64 | small | `mixed` | flat | 4.3 | 5.4 | 0.811 | dshmap |
 | 2048 | small | `insert_seq` | chained | 2.9 | 2.6 | 1.131 | chained |
 | 2048 | small | `insert_seq` | packed | 2.9 | 1.6 | 1.828 | packed |
 | 2048 | small | `insert_seq` | flat | 2.9 | 2.2 | 1.318 | flat |
@@ -287,9 +294,9 @@ entry visited.
 | 2048 | small | `iterate` | chained | 1.8 | 1.5 | 1.154 | chained |
 | 2048 | small | `iterate` | packed | 1.8 | 0.9 | 2.055 | packed |
 | 2048 | small | `iterate` | flat | 1.8 | 2.1 | 0.841 | dshmap |
-| 2048 | small | `mixed` | chained | 2.3 | 4.3 | 0.522 | dshmap |
-| 2048 | small | `mixed` | packed | 2.3 | 38.7 | 0.059 | dshmap |
-| 2048 | small | `mixed` | flat | 2.3 | 7.0 | 0.322 | dshmap |
+| 2048 | small | `mixed` | chained | 3.5 | 7.4 | 0.479 | dshmap |
+| 2048 | small | `mixed` | packed | 3.5 | 60.0 | 0.059 | dshmap |
+| 2048 | small | `mixed` | flat | 3.5 | 10.5 | 0.335 | dshmap |
 | 4096 | Swiss | `insert_seq` | chained | 3.8 | 2.7 | 1.405 | chained |
 | 4096 | Swiss | `insert_seq` | packed | 3.8 | 1.6 | 2.354 | packed |
 | 4096 | Swiss | `insert_seq` | flat | 3.8 | 2.5 | 1.535 | flat |
@@ -305,9 +312,9 @@ entry visited.
 | 4096 | Swiss | `iterate` | chained | 2.1 | 1.6 | 1.293 | chained |
 | 4096 | Swiss | `iterate` | packed | 2.1 | 0.9 | 2.361 | packed |
 | 4096 | Swiss | `iterate` | flat | 2.1 | 4.0 | 0.532 | dshmap |
-| 4096 | Swiss | `mixed` | chained | 3.6 | 6.6 | 0.551 | dshmap |
-| 4096 | Swiss | `mixed` | packed | 3.6 | 75.6 | 0.048 | dshmap |
-| 4096 | Swiss | `mixed` | flat | 3.6 | 8.9 | 0.410 | dshmap |
+| 4096 | Swiss | `mixed` | chained | 6.1 | 10.6 | 0.571 | dshmap |
+| 4096 | Swiss | `mixed` | packed | 6.1 | 120.5 | 0.050 | dshmap |
+| 4096 | Swiss | `mixed` | flat | 6.1 | 14.6 | 0.416 | dshmap |
 
 For large tables, the packed linear table is not useful for lookup-heavy
 workloads. The table below compares dshmap with the chained baseline only:
@@ -323,19 +330,19 @@ make bench BENCH_ARGS="--compare --impls dshmap,chained --sizes 65536,1048576,10
 | 65536 | Swiss | `find_miss` | 4.3 | 11.1 | 0.39 | dshmap |
 | 65536 | Swiss | `remove` | 5.7 | 6.5 | 0.88 | dshmap |
 | 65536 | Swiss | `iterate` | 3.1 | 7.5 | 0.42 | dshmap |
-| 65536 | Swiss | `mixed` | 4.9 | 9.3 | 0.53 | dshmap |
+| 65536 | Swiss | `mixed` | 9.3 | 16.3 | 0.57 | dshmap |
 | 1048576 | Swiss | `insert_seq` | 14.9 | 10.9 | 1.37 | chained |
 | 1048576 | Swiss | `find_hit` | 27.7 | 41.7 | 0.67 | dshmap |
 | 1048576 | Swiss | `find_miss` | 8.1 | 33.8 | 0.24 | dshmap |
 | 1048576 | Swiss | `remove` | 25.3 | 32.1 | 0.79 | dshmap |
 | 1048576 | Swiss | `iterate` | 3.5 | 16.7 | 0.21 | dshmap |
-| 1048576 | Swiss | `mixed` | 13.6 | 23.9 | 0.57 | dshmap |
+| 1048576 | Swiss | `mixed` | 22.4 | 38.7 | 0.58 | dshmap |
 | 10000000 | Swiss | `insert_seq` | 31.3 | 28.0 | 1.12 | chained |
 | 10000000 | Swiss | `find_hit` | 56.0 | 50.5 | 1.11 | chained |
 | 10000000 | Swiss | `find_miss` | 22.9 | 34.8 | 0.66 | dshmap |
 | 10000000 | Swiss | `remove` | 50.4 | 42.7 | 1.18 | chained |
 | 10000000 | Swiss | `iterate` | 3.1 | 21.4 | 0.14 | dshmap |
-| 10000000 | Swiss | `mixed` | 19.5 | 33.5 | 0.58 | dshmap |
+| 10000000 | Swiss | `mixed` | 28.3 | 47.9 | 0.59 | dshmap |
 
 ### Memory
 

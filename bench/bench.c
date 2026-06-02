@@ -21,8 +21,11 @@
 #define COMPILER_BARRIER()   __asm__ volatile("" ::: "memory")
 
 #define DEFAULT_MIN_TOTAL_OPS 200000
-#define MIXED_ITER_SCANS 8
-#define MIXED_MIN_ITER_PERIOD 64
+#define DEFAULT_MIXED_FIND_PCT 70
+#define DEFAULT_MIXED_INSERT_PCT 20
+#define DEFAULT_MIXED_REMOVE_PCT 10
+#define DEFAULT_MIXED_INITIAL_PCT 50
+#define DEFAULT_MIXED_ITER_SCANS 8
 
 #ifndef PERF_IOC_FLAG_GROUP
 #define PERF_IOC_FLAG_GROUP (1U << 0)
@@ -68,6 +71,16 @@ static const char *bench_key_mode_names[BENCH_KEYS_COUNT] = {
     "expensive",
 };
 
+struct mixed_options {
+    unsigned find_pct;
+    unsigned insert_pct;
+    unsigned remove_pct;
+    unsigned initial_pct;
+    size_t iter_scans;
+    bool seed_set;
+    uint64_t seed;
+};
+
 struct bench_options {
     size_t *sizes;
     size_t n_sizes;
@@ -78,6 +91,7 @@ struct bench_options {
     size_t impl_names_cap;
     size_t min_total_ops;
     size_t samples;
+    struct mixed_options mixed;
     uint32_t op_mask;
     enum bench_key_mode key_mode;
     enum output_mode mode;
@@ -640,12 +654,93 @@ count_iterated_entries(const bench_impl *impl, void *ctx)
 }
 
 static size_t
-mixed_iter_period(size_t n)
+percent_of_size(size_t n, unsigned pct)
 {
-    size_t period = n / MIXED_ITER_SCANS;
+    return (n / 100) * pct + ((n % 100) * pct + 50) / 100;
+}
 
-    if (period < MIXED_MIN_ITER_PERIOD)
-        period = n < MIXED_MIN_ITER_PERIOD ? n : MIXED_MIN_ITER_PERIOD;
+enum mixed_op {
+    MIXED_OP_FIND = 0,
+    MIXED_OP_INSERT,
+    MIXED_OP_REMOVE,
+};
+
+static bool
+mixed_op_valid(enum mixed_op op, size_t live_count, size_t insert_count,
+               size_t extra)
+{
+    switch (op) {
+    case MIXED_OP_FIND:
+    case MIXED_OP_REMOVE:
+        return live_count != 0;
+    case MIXED_OP_INSERT:
+        return insert_count < extra;
+    }
+    abort();
+}
+
+static enum mixed_op
+mixed_pick_fallback(const struct mixed_options *mixed, enum mixed_op desired,
+                    size_t live_count, size_t insert_count, size_t extra)
+{
+    const unsigned weights[] = {
+        mixed->find_pct,
+        mixed->insert_pct,
+        mixed->remove_pct,
+    };
+
+    for (int pass = 0; pass < 2; pass++) {
+        enum mixed_op best_op = MIXED_OP_FIND;
+        unsigned best_weight = 0;
+        bool found = false;
+
+        for (enum mixed_op op = MIXED_OP_FIND; op <= MIXED_OP_REMOVE; op++) {
+            if (op == desired ||
+                !mixed_op_valid(op, live_count, insert_count, extra) ||
+                (pass == 0 && weights[op] == 0)) {
+                continue;
+            }
+            if (!found || weights[op] > best_weight) {
+                best_op = op;
+                best_weight = weights[op];
+                found = true;
+            }
+        }
+        if (found)
+            return best_op;
+    }
+
+    abort();
+}
+
+static enum mixed_op
+mixed_pick_op(const struct mixed_options *mixed, size_t live_count,
+              size_t insert_count, size_t extra)
+{
+    uint64_t r = rng_next() % 100;
+    enum mixed_op op;
+
+    if (r < mixed->find_pct)
+        op = MIXED_OP_FIND;
+    else if (r < mixed->find_pct + mixed->insert_pct)
+        op = MIXED_OP_INSERT;
+    else
+        op = MIXED_OP_REMOVE;
+
+    if (mixed_op_valid(op, live_count, insert_count, extra))
+        return op;
+    return mixed_pick_fallback(mixed, op, live_count, insert_count, extra);
+}
+
+static size_t
+mixed_iter_period(size_t n, const struct mixed_options *mixed)
+{
+    size_t period;
+
+    if (mixed->iter_scans == 0)
+        return 0;
+
+    period = n / mixed->iter_scans;
     return period ? period : 1;
 }
 
@@ -984,18 +1079,16 @@ bench_iterate(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
 
 static struct bench_result
 bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
-            struct perf_group *pg)
+            const struct mixed_options *mixed, struct perf_group *pg)
 {
     struct bench_result res = { .name = "mixed" };
     size_t iters = calc_iters(n);
 
     size_t n_ops = n;
-    size_t iter_period = mixed_iter_period(n_ops);
+    size_t iter_period = mixed_iter_period(n_ops, mixed);
     size_t measured_ops = 0;
-    size_t initial = (n + 1) / 2;
+    size_t initial = percent_of_size(n, mixed->initial_pct);
     size_t extra = n - initial;
-
-    enum { OP_FIND = 0, OP_INSERT = 1, OP_REMOVE = 2 };
 
     uint8_t *ops = xmalloc(n_ops);
     size_t *find_idx = xmalloc(n_ops * sizeof(size_t));
@@ -1008,6 +1101,8 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
     bench_hash_t *live_hashes = xmalloc(n * sizeof(*live_hashes));
 
     uint64_t saved_state = rng_state;
+    if (mixed->seed_set)
+        rng_seed(mixed->seed ^ n);
 
     for (size_t i = 0; i < extra; i++) {
         struct bench_entry *entry = extra_entries ? &extra_entries[i] : NULL;
@@ -1019,22 +1114,21 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
     size_t insert_count = 0;
     size_t live_count = initial;
     for (size_t i = 0; i < n_ops; i++) {
-        uint64_t r = rng_next() % 100;
-        if (r < 70 && live_count > 0) {
-            ops[i] = OP_FIND;
+        enum mixed_op op = mixed_pick_op(mixed, live_count, insert_count,
+                                         extra);
+        ops[i] = (uint8_t)op;
+        switch (op) {
+        case MIXED_OP_FIND:
             find_idx[i] = rng_next() % live_count;
-        } else if (r < 90 && insert_count < extra) {
-            ops[i] = OP_INSERT;
+            break;
+        case MIXED_OP_INSERT:
             find_idx[i] = insert_count++;
             live_count++;
-        } else if (live_count > 0) {
-            ops[i] = OP_REMOVE;
+            break;
+        case MIXED_OP_REMOVE:
             find_idx[i] = rng_next() % live_count;
             live_count--;
-        } else {
-            ops[i] = OP_INSERT;
-            find_idx[i] = insert_count++;
-            live_count++;
+            break;
         }
     }
 
@@ -1049,7 +1143,7 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
 
     for (size_t i = 0; i < n_ops; i++) {
         switch (ops[i]) {
-        case OP_FIND: {
+        case MIXED_OP_FIND: {
             size_t idx = find_idx[i];
             void *p = impl->find_key(ctx, live_hashes[idx], live_ptrs[idx],
                                      keys->eq_fn);
@@ -1058,7 +1152,7 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
             DO_NOT_OPTIMIZE(p);
             break;
         }
-        case OP_INSERT: {
+        case MIXED_OP_INSERT: {
             size_t idx = find_idx[i];
             impl->insert(ctx, extra_ptrs[idx], extra_hashes[idx]);
             live_ptrs[live_count] = extra_ptrs[idx];
@@ -1066,7 +1160,7 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
             live_count++;
             break;
         }
-        case OP_REMOVE: {
+        case MIXED_OP_REMOVE: {
             size_t idx = find_idx[i];
             impl->remove(ctx, live_ptrs[idx], live_hashes[idx]);
             live_count--;
@@ -1077,7 +1171,7 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
         }
         measured_ops++;
 
-        if ((i + 1) % iter_period == 0) {
+        if (iter_period && (i + 1) % iter_period == 0) {
             size_t iterated = count_iterated_entries(impl, ctx);
             if (iterated != live_count)
                 abort();
@@ -1108,14 +1202,14 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
 
             for (size_t i = 0; i < n_ops; i++) {
                 switch (ops[i]) {
-                case OP_FIND: {
+                case MIXED_OP_FIND: {
                     size_t idx = find_idx[i];
                     void *p = impl->find_key(ctx, live_hashes[idx],
                                              live_ptrs[idx], keys->eq_fn);
                     DO_NOT_OPTIMIZE(p);
                     break;
                 }
-                case OP_INSERT: {
+                case MIXED_OP_INSERT: {
                     size_t idx = find_idx[i];
                     impl->insert(ctx, extra_ptrs[idx], extra_hashes[idx]);
                     live_ptrs[live_count] = extra_ptrs[idx];
@@ -1123,7 +1217,7 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
                     live_count++;
                     break;
                 }
-                case OP_REMOVE: {
+                case MIXED_OP_REMOVE: {
                     size_t idx = find_idx[i];
                     impl->remove(ctx, live_ptrs[idx], live_hashes[idx]);
                     live_count--;
@@ -1133,7 +1227,7 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
                 }
                 }
 
-                if ((i + 1) % iter_period == 0)
+                if (iter_period && (i + 1) % iter_period == 0)
                     impl->for_each(ctx, iter_nop, NULL);
             }
 
@@ -1171,7 +1265,8 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
 
 static struct bench_result
 run_operation(enum bench_op op, const bench_impl *impl, size_t n,
-              const struct bench_keys *keys, struct perf_group *pg)
+              const struct bench_keys *keys, const struct bench_options *opts,
+              struct perf_group *pg)
 {
     switch (op) {
     case BENCH_INSERT_SEQ:
@@ -1197,7 +1292,7 @@ run_operation(enum bench_op op, const bench_impl *impl, size_t n,
         return bench_iterate(impl, n, keys->hash_fn, keys->ptrs,
                              keys->hashes, pg);
     case BENCH_MIXED:
-        return bench_mixed(impl, n, keys, pg);
+        return bench_mixed(impl, n, keys, &opts->mixed, pg);
     case BENCH_OP_COUNT:
         break;
     }
@@ -1262,7 +1357,7 @@ run_benchmarks(size_t n, const bench_impl **impls, size_t n_impls,
         for (enum bench_op op = 0; op < BENCH_OP_COUNT; op++) {
             if (!op_enabled(opts->op_mask, op))
                 continue;
-            r = run_operation(op, impl, n, &keys, pg);
+            r = run_operation(op, impl, n, &keys, opts, pg);
             print_result(&r, pg->available);
         }
     }
@@ -1313,13 +1408,14 @@ run_compare(size_t n, const bench_impl **impls, size_t n_impls,
         if (!op_enabled(opts->op_mask, op))
             continue;
 
-        struct bench_result base = run_operation(op, baseline, n, &keys, pg);
+        struct bench_result base = run_operation(op, baseline, n, &keys, opts,
+                                                 pg);
         double base_ns = result_ns_per_op(&base);
 
         for (size_t impl_i = 1; impl_i < n_impls; impl_i++) {
             const bench_impl *candidate = impls[impl_i];
             struct bench_result cand = run_operation(op, candidate, n, &keys,
-                                                     pg);
+                                                     opts, pg);
             double cand_ns = result_ns_per_op(&cand);
             const char *winner = base_ns < cand_ns ? baseline->name
                                                    : candidate->name;
@@ -1346,7 +1442,8 @@ run_csv(size_t n, const bench_impl **impls, size_t n_impls,
         for (enum bench_op op = 0; op < BENCH_OP_COUNT; op++) {
             if (!op_enabled(opts->op_mask, op))
                 continue;
-            struct bench_result r = run_operation(op, impl, n, &keys, pg);
+            struct bench_result r = run_operation(op, impl, n, &keys, opts,
+                                                  pg);
             print_csv_result(opts->key_mode, n, impl, &r, pg->available,
                              memory);
         }
@@ -1372,6 +1469,10 @@ usage(const char *prog, FILE *out)
             "  --csv                 print machine-readable CSV rows\n"
             "  --min-ops N           target at least N operations per benchmark\n"
             "  --samples N           report the median of N timed samples\n"
+            "  --mixed-ratio F,I,R   mixed find/insert/remove percentages\n"
+            "  --mixed-initial PCT   mixed starting fill percentage\n"
+            "  --mixed-iter-scans N  mixed full-table scans; 0 disables them\n"
+            "  --mixed-seed N        mixed operation-sequence seed\n"
             "  --no-perf             skip hardware performance counters\n"
             "  --help                show this help\n"
             "\n"
@@ -1389,16 +1490,43 @@ die_usage(const char *prog, const char *msg)
 }
 
 static bool
-parse_size_value(const char *s, size_t *out)
+parse_u64_value(const char *s, uint64_t *out)
 {
     char *end;
     errno = 0;
     unsigned long long v = strtoull(s, &end, 0);
-    if (errno || end == s || *end != '\0' || v == 0 ||
-        v > (unsigned long long)SIZE_MAX) {
+    if (errno || end == s || *end != '\0')
         return false;
-    }
+
+    *out = (uint64_t)v;
+    return true;
+}
+
+static bool
+parse_size_value_allow_zero(const char *s, size_t *out)
+{
+    uint64_t v;
+
+    if (!parse_u64_value(s, &v) || v > (uint64_t)SIZE_MAX)
+        return false;
     *out = (size_t)v;
+    return true;
+}
+
+static bool
+parse_size_value(const char *s, size_t *out)
+{
+    return parse_size_value_allow_zero(s, out) && *out != 0;
+}
+
+static bool
+parse_percent_value(const char *s, unsigned *out)
+{
+    uint64_t v;
+
+    if (!parse_u64_value(s, &v) || v > 100)
+        return false;
+    *out = (unsigned)v;
     return true;
 }
 
@@ -1561,6 +1689,75 @@ parse_impls(const char *prog, struct bench_options *opts, const char *arg)
         die_usage(prog, "--impls must name at least one implementation");
 }
 
+static void
+parse_mixed_ratio(const char *prog, struct bench_options *opts,
+                  const char *arg)
+{
+    if (*arg == '\0' || *arg == ',' || arg[strlen(arg) - 1] == ',')
+        die_usage(prog, "invalid --mixed-ratio value");
+
+    size_t commas = 0;
+    for (const char *p = arg; *p; p++) {
+        if (*p == ',') {
+            if (p[1] == ',')
+                die_usage(prog, "invalid --mixed-ratio value");
+            commas++;
+        }
+    }
+    if (commas != 2)
+        die_usage(prog, "invalid --mixed-ratio value");
+
+    char *copy = malloc(strlen(arg) + 1);
+    if (!copy) {
+        fprintf(stderr, "bench: out of memory\n");
+        exit(1);
+    }
+    strcpy(copy, arg);
+
+    unsigned pct[3];
+    size_t n = 0;
+    unsigned sum = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(copy, ",", &save); tok;
+         tok = strtok_r(NULL, ",", &save)) {
+        if (n == 3 || !parse_percent_value(tok, &pct[n]))
+            die_usage(prog, "invalid --mixed-ratio value");
+        sum += pct[n++];
+    }
+    if (n != 3 || sum != 100)
+        die_usage(prog, "invalid --mixed-ratio value");
+
+    opts->mixed.find_pct = pct[0];
+    opts->mixed.insert_pct = pct[1];
+    opts->mixed.remove_pct = pct[2];
+    free(copy);
+}
+
+static void
+parse_mixed_initial(const char *prog, struct bench_options *opts,
+                    const char *arg)
+{
+    if (!parse_percent_value(arg, &opts->mixed.initial_pct))
+        die_usage(prog, "invalid --mixed-initial value");
+}
+
+static void
+parse_mixed_iter_scans(const char *prog, struct bench_options *opts,
+                       const char *arg)
+{
+    if (!parse_size_value_allow_zero(arg, &opts->mixed.iter_scans))
+        die_usage(prog, "invalid --mixed-iter-scans value");
+}
+
+static void
+parse_mixed_seed(const char *prog, struct bench_options *opts,
+                 const char *arg)
+{
+    if (!parse_u64_value(arg, &opts->mixed.seed))
+        die_usage(prog, "invalid --mixed-seed value");
+    opts->mixed.seed_set = true;
+}
+
 static bool
 parse_op_name(const char *name, enum bench_op *op)
 {
@@ -1634,6 +1831,13 @@ parse_args(int argc, char **argv, struct bench_options *opts)
     opts->impl_names_cap = 0;
     opts->min_total_ops = DEFAULT_MIN_TOTAL_OPS;
     opts->samples = 7;
+    opts->mixed.find_pct = DEFAULT_MIXED_FIND_PCT;
+    opts->mixed.insert_pct = DEFAULT_MIXED_INSERT_PCT;
+    opts->mixed.remove_pct = DEFAULT_MIXED_REMOVE_PCT;
+    opts->mixed.initial_pct = DEFAULT_MIXED_INITIAL_PCT;
+    opts->mixed.iter_scans = DEFAULT_MIXED_ITER_SCANS;
+    opts->mixed.seed_set = false;
+    opts->mixed.seed = 0;
     opts->op_mask = (1u << BENCH_OP_COUNT) - 1;
     opts->key_mode = BENCH_KEYS_PTR;
     opts->mode = OUTPUT_DETAIL;
@@ -1681,6 +1885,22 @@ parse_args(int argc, char **argv, struct bench_options *opts)
                 die_usage(argv[0], "--samples requires an argument");
             if (!parse_size_value(argv[i], &opts->samples))
                 die_usage(argv[0], "invalid --samples value");
+        } else if (strcmp(argv[i], "--mixed-ratio") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--mixed-ratio requires an argument");
+            parse_mixed_ratio(argv[0], opts, argv[i]);
+        } else if (strcmp(argv[i], "--mixed-initial") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--mixed-initial requires an argument");
+            parse_mixed_initial(argv[0], opts, argv[i]);
+        } else if (strcmp(argv[i], "--mixed-iter-scans") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--mixed-iter-scans requires an argument");
+            parse_mixed_iter_scans(argv[0], opts, argv[i]);
+        } else if (strcmp(argv[i], "--mixed-seed") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--mixed-seed requires an argument");
+            parse_mixed_seed(argv[0], opts, argv[i]);
         } else if (strcmp(argv[i], "--no-perf") == 0) {
             opts->use_perf = false;
         } else {

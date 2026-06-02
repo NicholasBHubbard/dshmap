@@ -21,6 +21,8 @@ test: tests/test.c tests/test_oom.c bench/bench.c dshmap.h
 	./bench/bench --csv --impls ,dshmap --sizes 1 --ops find_hit --samples 1 --min-ops 1 --no-perf 2>&1 | grep -q 'invalid --impls value'
 	./bench/bench --csv --linear 1:3 --ops find_miss --min-ops 1 --no-perf >/dev/null
 	./bench/bench --csv --sizes 8 --ops insert_seq,find_hit,find_miss,remove,iterate,mixed --samples 3 --min-ops 1 --no-perf >/dev/null
+	./bench/bench --csv --sizes 8 --ops mixed --mixed-ratio 80,10,10 --mixed-initial 75 --mixed-iter-scans 0 --mixed-seed 123 --samples 3 --min-ops 1 --no-perf >/dev/null
+	./bench/bench --csv --mixed-ratio 80,10,5 --sizes 1 --ops mixed --samples 1 --min-ops 1 --no-perf 2>&1 | grep -q 'invalid --mixed-ratio value'
 	./bench/bench --compare --sizes 2 --keys string --ops find_hit --min-ops 1 --no-perf >/dev/null
 	./bench/bench --csv --sizes 8 --keys string --ops find_hit,find_miss,mixed --samples 3 --min-ops 1 --no-perf >/dev/null
 	./bench/bench --csv --sizes 2 --keys expensive --ops find_miss --min-ops 1 --no-perf >/dev/null
