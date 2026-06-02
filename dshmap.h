@@ -246,8 +246,8 @@ typedef bool (*dshmap_key_eq_fn)(const void *entry, const void *key);
  * dshmap has no internal locking. Use external locking if any thread may
  * mutate the table while another thread can access it.
  *
- * Must be initialized with dshmap_init() before use and cleaned up with
- * dshmap_destroy(). Stack allocation is typical:
+ * Must be initialized with dshmap_init() or DSHMAP_INITIALIZER before use
+ * and cleaned up with dshmap_destroy(). Stack allocation is typical:
  *
  *     dshmap map;
  *     dshmap_init(&map, my_hash);
@@ -262,6 +262,18 @@ typedef struct dshmap {
     size_t growth_left;   /* Swiss growth left, or small free-list head */
     bool small;           /* using the small chained layout */
 } dshmap;
+
+/* DSHMAP_INITIALIZER - Static initializer for an empty table.
+ *
+ * Use this for static storage or aggregate initialization. HASH_FN has
+ * the same contract as the hash_fn argument to dshmap_init(). The table
+ * may be used immediately and must still be cleaned up with
+ * dshmap_destroy() when done.
+ *
+ *     static dshmap map = DSHMAP_INITIALIZER(my_hash);
+ */
+#define DSHMAP_INITIALIZER(HASH_FN) \
+    { (int8_t *)dshmap__empty_ctrl, NULL, NULL, (HASH_FN), 0, 0, 0, false }
 
 /* dshmap_iter - Cursor for iterating all entries.
  *

@@ -57,6 +57,7 @@ Full documentation is in `dshmap.h`.
 
 | Function | Description |
 |---|---|
+| `DSHMAP_INITIALIZER` | Static initializer for an empty table |
 | `dshmap_init` | Initialize a table |
 | `dshmap_destroy` | Free table memory |
 | `dshmap_clear` | Remove all entries, keep capacity |
@@ -75,6 +76,10 @@ Full documentation is in `dshmap.h`.
 | `DSHMAP_FOR_EACH` | Iterate all entries |
 | `DSHMAP_FOR_EACH_SAFE` | Iterate all entries while removing the current entry |
 | `DSHMAP_FOR_EACH_WITH_HASH` | Iterate entries with a matching full hash |
+
+Use `DSHMAP_INITIALIZER(hash_fn)` for static storage or aggregate
+initialization. Tables initialized this way are ready to use and still need
+`dshmap_destroy()` when done.
 
 `NULL` entries are not supported. `dshmap` uses `NULL` as the lookup miss result
 and as an iteration sentinel.

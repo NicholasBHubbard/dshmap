@@ -81,6 +81,29 @@ test_lifecycle(void)
 }
 
 static void
+test_static_initializer(void)
+{
+    static dshmap map = DSHMAP_INITIALIZER(dummy_hash);
+
+    assert(dshmap_size(&map) == 0);
+    assert(dshmap_is_empty(&map));
+
+    dshmap_insert(&map, (void *)1, dummy_hash((void *)1));
+    dshmap_insert(&map, (void *)2, dummy_hash((void *)2));
+    assert(dshmap_size(&map) == 2);
+    assert(dshmap_find(&map, dummy_hash((void *)1)) == (void *)1);
+    assert(dshmap_find(&map, dummy_hash((void *)2)) == (void *)2);
+
+    dshmap_clear(&map);
+    assert(dshmap_is_empty(&map));
+
+    dshmap_insert(&map, (void *)3, dummy_hash((void *)3));
+    assert(dshmap_find(&map, dummy_hash((void *)3)) == (void *)3);
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_insert_find(void)
 {
     dshmap map;
@@ -1993,6 +2016,7 @@ main(void)
 {
     printf("dshmap tests:\n");
     RUN_TEST(test_lifecycle);
+    RUN_TEST(test_static_initializer);
     RUN_TEST(test_insert_find);
     RUN_TEST(test_insert_multiple);
     RUN_TEST(test_duplicate_hashes);
