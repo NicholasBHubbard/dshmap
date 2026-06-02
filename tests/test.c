@@ -116,6 +116,7 @@ enum {
 
 static size_t counted_hash_calls;
 static size_t macro_hash_calls;
+static size_t macro_map_calls;
 static uint64_t model_rng_state;
 
 static bool
@@ -146,6 +147,13 @@ macro_hash_arg(dshmap_hash_t hash)
 {
     macro_hash_calls++;
     return hash;
+}
+
+static dshmap *
+macro_map_arg(dshmap *map)
+{
+    macro_map_calls++;
+    return map;
 }
 
 static bool
@@ -1270,6 +1278,116 @@ test_iteration_empty(void)
 }
 
 static void
+test_iterator_api(void)
+{
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+
+    size_t n = 64;
+    for (size_t i = 1; i <= n; i++) {
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
+    }
+
+    bool seen[65] = {0};
+    size_t count = 0;
+    dshmap_iter iter;
+    dshmap_iter_init(&iter, &map);
+    for (void *entry = dshmap_iter_next(&map, &iter);
+         entry;
+         entry = dshmap_iter_next(&map, &iter)) {
+        size_t val = (size_t)entry;
+        assert(val >= 1 && val <= n);
+        assert(!seen[val]);
+        seen[val] = true;
+        count++;
+    }
+    assert(count == n);
+    assert(dshmap_iter_next(&map, &iter) == NULL);
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_safe_iteration_removes_dense_cluster(void)
+{
+    if (DSHMAP_DENSE_THRESHOLD < 8) {
+        return;
+    }
+
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+
+    struct hashed_entry entries[8];
+    for (size_t i = 0; i < 8; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (dshmap_hash_t)(i * 16 + 1);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+    }
+    assert(map.dense);
+
+    bool seen[8] = {0};
+    size_t count = 0;
+    DSHMAP_FOR_EACH_SAFE(entry, next, &map) {
+        struct hashed_entry *e = entry;
+        (void)next;
+        assert(e >= entries && e < entries + 8);
+        assert(!seen[e->key]);
+        seen[e->key] = true;
+        count++;
+        dshmap_remove(&map, e, e->hash);
+    }
+
+    assert(count == 8);
+    assert(dshmap_is_empty(&map));
+    for (size_t i = 0; i < 8; i++) {
+        assert(seen[i]);
+    }
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_safe_iteration_removes_swiss_table(void)
+{
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+
+    size_t reserve_n = (size_t)DSHMAP_DENSE_THRESHOLD + 1;
+    if (reserve_n < 32) {
+        reserve_n = 32;
+    }
+    dshmap_reserve(&map, reserve_n);
+    assert(!map.dense);
+
+    struct hashed_entry entries[32];
+    for (size_t i = 0; i < 32; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = ((dshmap_hash_t)(i * 5) << 7) | (i & 0x7f);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+    }
+
+    bool seen[32] = {0};
+    size_t count = 0;
+    DSHMAP_FOR_EACH_SAFE(entry, next, &map) {
+        struct hashed_entry *e = entry;
+        (void)next;
+        assert(e >= entries && e < entries + 32);
+        assert(!seen[e->key]);
+        seen[e->key] = true;
+        count++;
+        dshmap_remove(&map, e, e->hash);
+    }
+
+    assert(count == 32);
+    assert(dshmap_is_empty(&map));
+    for (size_t i = 0; i < 32; i++) {
+        assert(seen[i]);
+    }
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_find_empty(void)
 {
     dshmap map;
@@ -1555,9 +1673,11 @@ test_for_each_with_hash(void)
     dshmap_insert(&map, &c, c.hash);
 
     macro_hash_calls = 0;
+    macro_map_calls = 0;
     bool found_a = false, found_b = false, found_c = false;
     size_t count = 0;
-    DSHMAP_FOR_EACH_WITH_HASH(e, &map, macro_hash_arg(target_hash)) {
+    DSHMAP_FOR_EACH_WITH_HASH(e, macro_map_arg(&map),
+                              macro_hash_arg(target_hash)) {
         count++;
         if (e == &a) found_a = true;
         else if (e == &b) found_b = true;
@@ -1567,13 +1687,17 @@ test_for_each_with_hash(void)
     assert(count == 3);
     assert(found_a && found_b && found_c);
     assert(macro_hash_calls == 1);
+    assert(macro_map_calls == 1);
 
     macro_hash_calls = 0;
-    DSHMAP_FOR_EACH_WITH_HASH(e, &map, macro_hash_arg(0x1234)) {
+    macro_map_calls = 0;
+    DSHMAP_FOR_EACH_WITH_HASH(e, macro_map_arg(&map),
+                              macro_hash_arg(0x1234)) {
         (void)e;
         assert(0 && "FOR_EACH_WITH_HASH returned missing hash");
     }
     assert(macro_hash_calls == 1);
+    assert(macro_map_calls == 1);
 
 #if DSHMAP_DENSE_THRESHOLD != 0
     dshmap_reserve(&map, DSHMAP_DENSE_THRESHOLD + 1);
@@ -1738,6 +1862,9 @@ main(void)
     RUN_TEST(test_large_table);
     RUN_TEST(test_iteration);
     RUN_TEST(test_iteration_empty);
+    RUN_TEST(test_iterator_api);
+    RUN_TEST(test_safe_iteration_removes_dense_cluster);
+    RUN_TEST(test_safe_iteration_removes_swiss_table);
     RUN_TEST(test_find_empty);
     RUN_TEST(test_remove_empty);
     RUN_TEST(test_remove_nonexistent);

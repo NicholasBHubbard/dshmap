@@ -186,6 +186,18 @@ typedef struct dshmap {
     bool dense;           /* using the dense layout */
 } dshmap;
 
+/* dshmap_iter - Cursor for iterating all entries.
+ *
+ * The fields are public so the type can be stack allocated, but callers
+ * should not read or write them directly. Initialize with
+ * dshmap_iter_init(), then call dshmap_iter_next() until it returns NULL.
+ * Iteration order is arbitrary and may change after inserts or removes.
+ */
+typedef struct dshmap_iter {
+    size_t group;
+    uint64_t occupied;
+} dshmap_iter;
+
 /* dshmap_init - Initialize a table.
  *
  * The caller must call dshmap_destroy() when done. No memory is
@@ -365,52 +377,107 @@ dshmap_find_key_next(const dshmap *map, dshmap_hash_t hash, const void *key,
 static inline void
 dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash);
 
+/* dshmap_iter_init - Initialize an iterator.
+ *
+ * The iterator starts before the first entry. The map argument is accepted
+ * for future compatibility and should be the map that will be iterated.
+ *
+ *     dshmap_iter iter;
+ *     dshmap_iter_init(&iter, &map);
+ */
+static inline void
+dshmap_iter_init(dshmap_iter *iter, const dshmap *map);
+
+/* dshmap_iter_next - Return the next entry from an iterator.
+ *
+ * Returns NULL when there are no more entries. Do not insert or remove
+ * entries while using this iterator. Use DSHMAP_FOR_EACH_SAFE when the
+ * current entry may be removed during iteration.
+ *
+ *     dshmap_iter iter;
+ *     dshmap_iter_init(&iter, &map);
+ *     for (void *entry = dshmap_iter_next(&map, &iter);
+ *          entry;
+ *          entry = dshmap_iter_next(&map, &iter)) {
+ *         process(entry);
+ *     }
+ */
+static inline void *
+dshmap_iter_next(const dshmap *map, dshmap_iter *iter);
+
+/* dshmap_iter_next_after - Return the entry after another entry.
+ *
+ * entry must be non-NULL and currently present in map. This is mainly used
+ * by DSHMAP_FOR_EACH_SAFE to pick the next entry before the current entry is
+ * removed. It scans from the start of the table, so use dshmap_iter_next()
+ * for normal iteration.
+ */
+static inline void *
+dshmap_iter_next_after(const dshmap *map, const void *entry);
+
 /* DSHMAP_FOR_EACH - Iterate over all entries in the table.
  *
  * 'var' is declared as void * in the loop scope. Entries must be
  * non-NULL; NULL is used internally as the loop sentinel. Iteration
  * order is arbitrary and not related to insertion order. Do not insert
- * or remove entries during iteration. The 'map' argument is evaluated
- * more than once, so pass a simple table pointer with no side effects.
- * A break statement inside the loop body only breaks one generated inner
- * loop; it does not stop the whole iteration.
- *
- * Scans control groups using SWAR and visits occupied slots. Iteration
- * cost is affected by allocated table capacity and entry distribution.
+ * or remove entries during iteration. The 'map' argument is evaluated once.
  *
  *     DSHMAP_FOR_EACH(entry, &map) {
  *         printf("%s\n", ((struct my_obj *)entry)->name);
  *     }
  */
 #define DSHMAP_FOR_EACH(var, map) \
-    for (size_t var##_g_ = 0; var##_g_ <= (map)->group_mask; var##_g_++) \
-    for (uint64_t var##_o_ = dshmap__ctrl_occupied(dshmap__load_ctrl(map, var##_g_)); \
-         var##_o_; \
-         var##_o_ &= var##_o_ - 1) \
-    for (void *var = (map)->slots[dshmap__slot_pos(var##_g_, dshmap__match_slot(var##_o_))]; \
-         var; var = NULL)
+    for (const dshmap *var##_map_ = (map); var##_map_; var##_map_ = NULL) \
+    for (dshmap_iter var##_iter_, *var##_iterp_ = \
+             (dshmap_iter_init(&var##_iter_, var##_map_), &var##_iter_); \
+         var##_iterp_; \
+         var##_iterp_ = NULL) \
+    for (void *var = dshmap_iter_next(var##_map_, var##_iterp_); \
+         var; \
+         var = dshmap_iter_next(var##_map_, var##_iterp_))
+
+/* DSHMAP_FOR_EACH_SAFE - Iterate while the current entry may be removed.
+ *
+ * 'var' and 'next' are declared as void * in the loop scope. The loop is
+ * safe when the body removes or frees only the current entry, var. Do not
+ * insert entries, clear the table, or remove other entries during the loop.
+ * Iteration order is arbitrary. The 'map' argument is evaluated once.
+ *
+ *     DSHMAP_FOR_EACH_SAFE(entry, next, &map) {
+ *         dshmap_remove(&map, entry, my_hash(entry));
+ *         free(entry);
+ *     }
+ */
+#define DSHMAP_FOR_EACH_SAFE(var, next, map) \
+    for (const dshmap *var##_map_ = (map); var##_map_; var##_map_ = NULL) \
+    for (dshmap_iter var##_iter_, *var##_iterp_ = \
+             (dshmap_iter_init(&var##_iter_, var##_map_), &var##_iter_); \
+         var##_iterp_; \
+         var##_iterp_ = NULL) \
+    for (void *var = dshmap_iter_next(var##_map_, var##_iterp_), *next = NULL; \
+         var && ((next = dshmap__iter_next_safe(var##_map_, var##_iterp_, var)), true); \
+         var = next)
 
 /* DSHMAP_FOR_EACH_WITH_HASH - Iterate over entries with a full hash.
  *
  * 'var' is declared as void * in the loop scope. Visits each entry whose
- * full hash equals 'hash'. The hash expression is evaluated once. The
- * 'map' argument is evaluated more than once, so pass a simple table
- * pointer with no side effects. Iteration order is arbitrary and not
- * related to insertion order. Do not insert or remove entries during
- * iteration.
+ * full hash equals 'hash'. The map and hash expressions are evaluated
+ * once. Iteration order is arbitrary and not related to insertion order.
+ * Do not insert or remove entries during iteration.
  *
  *     DSHMAP_FOR_EACH_WITH_HASH(entry, &map, hash) {
  *         process(entry);
  *     }
  */
 #define DSHMAP_FOR_EACH_WITH_HASH(var, map, hash) \
+    for (const dshmap *var##_map_ = (map); var##_map_; var##_map_ = NULL) \
     for (bool var##_once_ = true; var##_once_; ) \
     for (dshmap_hash_t var##_hash_ = (hash); \
          var##_once_; \
          var##_once_ = false) \
-    for (void *var = dshmap_find((map), var##_hash_); \
+    for (void *var = dshmap_find(var##_map_, var##_hash_); \
          var; \
-         var = dshmap_find_next((map), var##_hash_, var))
+         var = dshmap_find_next(var##_map_, var##_hash_, var))
 
 /* ===========================================================================
  *                                INTERNAL
@@ -990,6 +1057,70 @@ static inline bool
 dshmap_is_empty(const dshmap *map)
 {
     return map->size == 0;
+}
+
+static inline void
+dshmap_iter_init(dshmap_iter *iter, const dshmap *map)
+{
+    (void)map;
+    iter->group = 0;
+    iter->occupied = 0;
+}
+
+static inline void *
+dshmap_iter_next(const dshmap *map, dshmap_iter *iter)
+{
+    if (!dshmap__is_allocated(map)) {
+        return NULL;
+    }
+
+    for (;;) {
+        if (iter->occupied) {
+            size_t group = iter->group - 1;
+            size_t pos = dshmap__slot_pos(
+                group, dshmap__ctrl_next_match(&iter->occupied));
+            return map->slots[pos];
+        }
+        if (iter->group > map->group_mask) {
+            return NULL;
+        }
+        iter->occupied = dshmap__ctrl_occupied(
+            dshmap__load_ctrl(map, iter->group));
+        iter->group++;
+    }
+}
+
+static inline void *
+dshmap_iter_next_after(const dshmap *map, const void *entry)
+{
+    bool found = false;
+
+    if (entry == NULL || !dshmap__is_allocated(map)) {
+        return NULL;
+    }
+
+    for (size_t group = 0; group <= map->group_mask; group++) {
+        uint64_t occupied = dshmap__ctrl_occupied(
+            dshmap__load_ctrl(map, group));
+        while (occupied) {
+            size_t pos = dshmap__slot_pos(
+                group, dshmap__ctrl_next_match(&occupied));
+            if (found) {
+                return map->slots[pos];
+            }
+            if (map->slots[pos] == entry) {
+                found = true;
+            }
+        }
+    }
+    return NULL;
+}
+
+static inline void *
+dshmap__iter_next_safe(const dshmap *map, dshmap_iter *iter, const void *entry)
+{
+    return dshmap__is_dense(map) ? dshmap_iter_next_after(map, entry)
+                                 : dshmap_iter_next(map, iter);
 }
 
 static inline void

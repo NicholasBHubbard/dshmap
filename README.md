@@ -8,6 +8,7 @@ dshmap is a header only C99 swiss-style hash map with a dense small-table fast p
 - **Scale-oriented**: flat layouts reduce pointer chasing and cache misses; the largest Swiss-table wins show up on large tables, especially misses, removes, iteration, and memory use ([see benchmarks](#benchmarks))
 - **Cache-friendly**: contiguous control bytes and slots improve locality compared with pointer-heavy tables
 - **Configurable hash storage**: store full hashes per slot when hash functions are expensive, or omit them to reduce memory use
+- **Public iterators**: cursor-based iteration plus safe remove-current iteration
 - **Header-only**: single file, no build system integration, no dependencies beyond the C standard library
 - **Generic**: stores caller-owned non-`NULL` `void *` entries; each entry pointer may be present at most once
 - **Small**: ~9 bytes/entry overhead in Swiss mode at typical load factors
@@ -67,7 +68,11 @@ Full documentation is in `dshmap.h`.
 | `dshmap_find_key` | Look up by hash and key equality; key-aware form of `dshmap_find` |
 | `dshmap_find_key_next` | Continue a key-aware lookup through duplicate logical keys |
 | `dshmap_remove` | Remove an entry by pointer |
+| `dshmap_iter_init` | Initialize an all-entry iterator |
+| `dshmap_iter_next` | Return the next entry from an iterator |
+| `dshmap_iter_next_after` | Return the entry after a currently present entry |
 | `DSHMAP_FOR_EACH` | Iterate all entries |
+| `DSHMAP_FOR_EACH_SAFE` | Iterate all entries while removing the current entry |
 | `DSHMAP_FOR_EACH_WITH_HASH` | Iterate entries with a matching full hash |
 
 `NULL` entries are not supported. `dshmap` uses `NULL` as the lookup miss result
@@ -92,6 +97,40 @@ large tables compact. Disabling hash storage saves one `dshmap_hash_t` per slot
 but recomputes hashes during some lookups, removals, and resizes. Enabling hash
 storage can help when hash functions are expensive or collision-heavy lookups
 are common.
+
+## Iteration
+
+Use `DSHMAP_FOR_EACH` for normal all-entry iteration:
+
+```c
+DSHMAP_FOR_EACH(entry, &map) {
+    process(entry);
+}
+```
+
+Use `DSHMAP_FOR_EACH_SAFE` when the loop removes or frees the current entry:
+
+```c
+DSHMAP_FOR_EACH_SAFE(entry, next, &map) {
+    dshmap_remove(&map, entry, entry_hash(entry));
+    free(entry);
+}
+```
+
+The safe macro is only for removing the current entry. Do not insert entries,
+clear the table, or remove other entries during that loop.
+
+For manual control, use `dshmap_iter`:
+
+```c
+dshmap_iter iter;
+dshmap_iter_init(&iter, &map);
+for (void *entry = dshmap_iter_next(&map, &iter);
+     entry;
+     entry = dshmap_iter_next(&map, &iter)) {
+    process(entry);
+}
+```
 
 ## Allocation Failure
 
@@ -167,47 +206,48 @@ vtable and add it to the `impls[]` array in `bench/bench.c`.
 
 The table below uses the `ptr` workload, with hardware counters disabled.
 Values are median wall-clock timings from 7 runs. Ratio is
-`dshmap / chained`, so lower is better.
+`dshmap / chained`, so lower is better. Layout is the dshmap layout used for
+that size with the default `DSHMAP_DENSE_THRESHOLD=2048`.
 
 ```
-make bench BENCH_ARGS="--csv --sizes 64,2048,4096,65536,1048576 --keys ptr --ops insert_seq,find_hit,find_miss,remove,iterate,mixed --min-ops 500000 --no-perf"
+make bench BENCH_ARGS="--compare --sizes 64,2048,4096,65536,1048576 --keys ptr --ops insert_seq,find_hit,find_miss,remove,iterate,mixed --min-ops 500000 --no-perf"
 ```
 
 `mixed` starts from a half-full table and runs a randomized workload of about
 70% find, 20% insert, and 10% remove.
 
-| Size | Operation | dshmap (ns/op) | chained (ns/op) | Ratio | Winner |
-|---:|---|---:|---:|---:|---|
-| 64 | `insert_seq` | 8.0 | 7.4 | 1.08 | chained |
-| 64 | `find_hit` | 3.0 | 2.1 | 1.45 | chained |
-| 64 | `find_miss` | 2.9 | 2.8 | 1.03 | chained |
-| 64 | `remove` | 4.9 | 5.4 | 0.91 | dshmap |
-| 64 | `iterate` | 1.4 | 1.6 | 0.88 | dshmap |
-| 64 | `mixed` | 3.2 | 3.4 | 0.94 | dshmap |
-| 2048 | `insert_seq` | 9.3 | 20.5 | 0.46 | dshmap |
-| 2048 | `find_hit` | 3.2 | 2.2 | 1.45 | chained |
-| 2048 | `find_miss` | 2.8 | 3.2 | 0.88 | dshmap |
-| 2048 | `remove` | 5.1 | 7.9 | 0.64 | dshmap |
-| 2048 | `iterate` | 2.5 | 1.8 | 1.38 | chained |
-| 2048 | `mixed` | 3.2 | 5.4 | 0.60 | dshmap |
-| 4096 | `insert_seq` | 15.1 | 18.2 | 0.83 | dshmap |
-| 4096 | `find_hit` | 3.9 | 6.9 | 0.57 | dshmap |
-| 4096 | `find_miss` | 3.7 | 8.4 | 0.44 | dshmap |
-| 4096 | `remove` | 4.6 | 10.7 | 0.43 | dshmap |
-| 4096 | `iterate` | 2.5 | 2.7 | 0.93 | dshmap |
-| 4096 | `mixed` | 4.7 | 9.8 | 0.48 | dshmap |
-| 65536 | `insert_seq` | 18.0 | 16.7 | 1.08 | chained |
-| 65536 | `find_hit` | 4.7 | 14.6 | 0.32 | dshmap |
-| 65536 | `find_miss` | 4.4 | 16.4 | 0.27 | dshmap |
-| 65536 | `remove` | 6.1 | 17.5 | 0.35 | dshmap |
-| 65536 | `iterate` | 2.6 | 7.4 | 0.35 | dshmap |
-| 65536 | `mixed` | 7.8 | 16.1 | 0.49 | dshmap |
-| 1048576 | `insert_seq` | 23.8 | 36.8 | 0.65 | dshmap |
-| 1048576 | `find_hit` | 25.4 | 41.9 | 0.61 | dshmap |
-| 1048576 | `find_miss` | 7.6 | 48.6 | 0.16 | dshmap |
-| 1048576 | `remove` | 26.2 | 92.3 | 0.28 | dshmap |
-| 1048576 | `iterate` | 2.8 | 20.0 | 0.14 | dshmap |
-| 1048576 | `mixed` | 36.5 | 57.8 | 0.63 | dshmap |
+| Size | Layout | Operation | dshmap (ns/op) | chained (ns/op) | Ratio | Winner |
+|---:|---|---|---:|---:|---:|---|
+| 64 | dense | `insert_seq` | 7.9 | 8.4 | 0.94 | dshmap |
+| 64 | dense | `find_hit` | 2.8 | 2.1 | 1.33 | chained |
+| 64 | dense | `find_miss` | 2.7 | 2.6 | 1.01 | chained |
+| 64 | dense | `remove` | 4.9 | 6.9 | 0.72 | dshmap |
+| 64 | dense | `iterate` | 1.6 | 1.6 | 1.04 | chained |
+| 64 | dense | `mixed` | 3.1 | 3.1 | 1.02 | chained |
+| 2048 | dense | `insert_seq` | 8.7 | 19.4 | 0.45 | dshmap |
+| 2048 | dense | `find_hit` | 3.0 | 2.1 | 1.45 | chained |
+| 2048 | dense | `find_miss` | 2.6 | 2.9 | 0.91 | dshmap |
+| 2048 | dense | `remove` | 4.7 | 7.7 | 0.62 | dshmap |
+| 2048 | dense | `iterate` | 1.6 | 1.7 | 0.96 | dshmap |
+| 2048 | dense | `mixed` | 3.3 | 3.8 | 0.86 | dshmap |
+| 4096 | Swiss | `insert_seq` | 14.9 | 21.2 | 0.70 | dshmap |
+| 4096 | Swiss | `find_hit` | 3.8 | 6.2 | 0.62 | dshmap |
+| 4096 | Swiss | `find_miss` | 3.5 | 7.8 | 0.45 | dshmap |
+| 4096 | Swiss | `remove` | 4.4 | 10.4 | 0.42 | dshmap |
+| 4096 | Swiss | `iterate` | 2.0 | 2.6 | 0.77 | dshmap |
+| 4096 | Swiss | `mixed` | 4.6 | 7.3 | 0.62 | dshmap |
+| 65536 | Swiss | `insert_seq` | 18.0 | 16.1 | 1.12 | chained |
+| 65536 | Swiss | `find_hit` | 4.5 | 13.5 | 0.33 | dshmap |
+| 65536 | Swiss | `find_miss` | 4.1 | 15.9 | 0.26 | dshmap |
+| 65536 | Swiss | `remove` | 5.7 | 17.1 | 0.33 | dshmap |
+| 65536 | Swiss | `iterate` | 2.9 | 7.1 | 0.40 | dshmap |
+| 65536 | Swiss | `mixed` | 7.6 | 15.7 | 0.49 | dshmap |
+| 1048576 | Swiss | `insert_seq` | 30.2 | 41.6 | 0.73 | dshmap |
+| 1048576 | Swiss | `find_hit` | 24.3 | 40.0 | 0.61 | dshmap |
+| 1048576 | Swiss | `find_miss` | 7.2 | 46.7 | 0.15 | dshmap |
+| 1048576 | Swiss | `remove` | 27.0 | 92.0 | 0.29 | dshmap |
+| 1048576 | Swiss | `iterate` | 3.2 | 19.7 | 0.16 | dshmap |
+| 1048576 | Swiss | `mixed` | 38.4 | 57.5 | 0.67 | dshmap |
 
 ### Memory
 
