@@ -28,6 +28,13 @@ impl_dshmap_find(const void *ctx, bench_hash_t hash)
     return dshmap_find((const dshmap *)ctx, hash);
 }
 
+static void *
+impl_dshmap_find_key(const void *ctx, bench_hash_t hash, const void *key,
+                     bench_key_eq_fn eq_fn)
+{
+    return dshmap_find_key((const dshmap *)ctx, hash, key, eq_fn);
+}
+
 static void
 impl_dshmap_remove(void *ctx, const void *entry, bench_hash_t hash)
 {
@@ -68,7 +75,12 @@ impl_dshmap_memory_usage(const void *ctx)
     if (map->slots == NULL)
         return 0;
 
-    size_t capacity = (map->group_mask + 1) * 8;
+    if (map->small) {
+        size_t capacity = map->group_mask + 1;
+        return capacity * (sizeof(size_t) + sizeof(dshmap__small_node));
+    }
+
+    size_t capacity = (map->group_mask + 1) * DSHMAP__GROUP_WIDTH;
     size_t bytes = capacity * (1 + sizeof(void *));
     if (map->hashes != NULL)
         bytes += capacity * sizeof(dshmap_hash_t);
@@ -82,6 +94,7 @@ static const bench_impl impl_dshmap = {
     .destroy      = impl_dshmap_destroy,
     .insert       = impl_dshmap_insert,
     .find         = impl_dshmap_find,
+    .find_key     = impl_dshmap_find_key,
     .remove       = impl_dshmap_remove,
     .reserve      = impl_dshmap_reserve,
     .size         = impl_dshmap_size,

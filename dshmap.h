@@ -2,7 +2,7 @@
 #define DSHMAP_H
 
 #define DSHMAP_VERSION_MAJOR 0
-#define DSHMAP_VERSION_MINOR 1
+#define DSHMAP_VERSION_MINOR 2
 #define DSHMAP_VERSION_PATCH 0
 
 #if !defined(__GNUC__) && !defined(__clang__)
@@ -20,6 +20,43 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifndef DSHMAP_DISABLE_SIMD
+#define DSHMAP_DISABLE_SIMD 0
+#endif
+
+#if !DSHMAP_DISABLE_SIMD && defined(__SSE2__) && \
+    (defined(__AVX2__) || defined(__clang__))
+#include <emmintrin.h>
+#define DSHMAP__BACKEND_X86 1
+#elif !DSHMAP_DISABLE_SIMD && \
+      (defined(__ARM_NEON) || defined(__ARM_NEON__))
+#include <arm_neon.h>
+#define DSHMAP__BACKEND_NEON 1
+#else
+#define DSHMAP__BACKEND_SWAR 1
+#endif
+
+#ifndef DSHMAP__BACKEND_X86
+#define DSHMAP__BACKEND_X86 0
+#endif
+#ifndef DSHMAP__BACKEND_NEON
+#define DSHMAP__BACKEND_NEON 0
+#endif
+#ifndef DSHMAP__BACKEND_SWAR
+#define DSHMAP__BACKEND_SWAR 0
+#endif
+
+#if DSHMAP__BACKEND_SWAR
+#define DSHMAP__GROUP_WIDTH 8
+#define DSHMAP__GROUP_SHIFT 3
+#else
+#define DSHMAP__GROUP_WIDTH 16
+#define DSHMAP__GROUP_SHIFT 4
+#endif
+#define DSHMAP__GROUP_SLOT_MASK (DSHMAP__GROUP_WIDTH - 1)
+#define DSHMAP__GROUP_MASK_BITS \
+    ((uint64_t)((1ULL << DSHMAP__GROUP_WIDTH) - 1ULL))
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,7 +69,12 @@ extern "C" {
  *
  * The Swiss layout resizes when occupancy exceeds NUM/DEN of capacity.
  * Default is 7/8 (87.5%). Define both macros before including this
- * header to override. Dense mode uses an internal 3/4 load factor.
+ * header to override. Small chained mode uses a bucket/node capacity of
+ * at least the requested entry count and promotes to Swiss when it
+ * exceeds DSHMAP_SMALL_THRESHOLD.
+ * SIMD Swiss groups require at least 1/16. The SWAR fallback uses
+ * 8-slot groups and requires at least 1/8. Use at least 1/8 if the
+ * same config must compile on all supported backends.
  *
  *     #define DSHMAP_LOAD_FACTOR_NUM 3
  *     #define DSHMAP_LOAD_FACTOR_DEN 4
@@ -45,22 +87,33 @@ extern "C" {
 #define DSHMAP_LOAD_FACTOR_DEN 8
 #endif
 
-/* DSHMAP_DENSE_THRESHOLD - Maximum entries kept in dense mode.
+/* DSHMAP_SMALL_THRESHOLD - Maximum entries kept in small chained mode.
  *
- * Tables start as a simple open-addressed table. Once an insert would
- * exceed this threshold, the table promotes to the Swiss layout. Reserve
- * can also promote the table. Promotion is one-way; clear does not move
- * a table back to dense mode. Define as 0 to disable dense mode.
+ * Tables start as a pooled chained table. Once an insert would exceed
+ * this threshold, the table promotes to the Swiss layout. Reserve can
+ * also promote the table. Promotion is one-way; clear does not move a
+ * table back to small mode. Define as 0 to disable small mode.
+ *
+ * DSHMAP_DENSE_THRESHOLD is accepted as an old name for this setting.
  */
+#ifndef DSHMAP_SMALL_THRESHOLD
+#ifdef DSHMAP_DENSE_THRESHOLD
+#define DSHMAP_SMALL_THRESHOLD DSHMAP_DENSE_THRESHOLD
+#else
+#define DSHMAP_SMALL_THRESHOLD 2048
+#endif
+#endif
 #ifndef DSHMAP_DENSE_THRESHOLD
-#define DSHMAP_DENSE_THRESHOLD 2048
+#define DSHMAP_DENSE_THRESHOLD DSHMAP_SMALL_THRESHOLD
 #endif
 
-/* DSHMAP_DENSE_STORE_HASHES / DSHMAP_SWISS_STORE_HASHES - Hash storage.
+/* DSHMAP_SWISS_STORE_HASHES - Swiss hash storage.
  *
- * Define as 1 to store one full hash per slot in that layout, or 0 to
- * recompute hashes from entries when needed. Dense mode stores hashes by
- * default; Swiss mode does not.
+ * Define as 1 to store one full hash per Swiss slot, or 0 to recompute
+ * hashes from entries when needed. Swiss mode does not store full hashes
+ * by default. Small chained mode always stores full hashes in its nodes.
+ *
+ * DSHMAP_DENSE_STORE_HASHES is accepted as an old no-op setting.
  */
 #ifndef DSHMAP_DENSE_STORE_HASHES
 #define DSHMAP_DENSE_STORE_HASHES 1
@@ -69,6 +122,23 @@ extern "C" {
 #define DSHMAP_SWISS_STORE_HASHES 0
 #endif
 
+/* DSHMAP_DISABLE_SIMD - Force the SWAR control-byte backend.
+ *
+ * By default, dshmap uses the fastest simple backend found in local
+ * benchmarks:
+ *
+ * - x86 SIMD on AVX2 compiler targets
+ * - x86 SIMD on Clang SSE2 targets
+ * - NEON on ARM targets
+ * - SWAR otherwise
+ *
+ * GCC x86 builds without AVX2 use SWAR by default because the generic SSE2
+ * path was slower for successful key lookups in profiling. Define this as 1
+ * before including dshmap.h to disable SIMD and force the SWAR fallback.
+ *
+ *     #define DSHMAP_DISABLE_SIMD 1
+ *     #include "dshmap.h"
+ */
 #if DSHMAP_LOAD_FACTOR_NUM < 1
 #error "DSHMAP_LOAD_FACTOR_NUM must be at least 1"
 #endif
@@ -78,8 +148,8 @@ extern "C" {
 #if DSHMAP_LOAD_FACTOR_NUM > DSHMAP_LOAD_FACTOR_DEN
 #error "DSHMAP_LOAD_FACTOR_NUM must be <= DSHMAP_LOAD_FACTOR_DEN"
 #endif
-#if DSHMAP_DENSE_THRESHOLD < 0
-#error "DSHMAP_DENSE_THRESHOLD must be >= 0"
+#if DSHMAP_SMALL_THRESHOLD < 0
+#error "DSHMAP_SMALL_THRESHOLD must be >= 0"
 #endif
 #if DSHMAP_DENSE_STORE_HASHES != 0 && DSHMAP_DENSE_STORE_HASHES != 1
 #error "DSHMAP_DENSE_STORE_HASHES must be 0 or 1"
@@ -87,10 +157,17 @@ extern "C" {
 #if DSHMAP_SWISS_STORE_HASHES != 0 && DSHMAP_SWISS_STORE_HASHES != 1
 #error "DSHMAP_SWISS_STORE_HASHES must be 0 or 1"
 #endif
-#if DSHMAP_LOAD_FACTOR_DEN / 8 > DSHMAP_LOAD_FACTOR_NUM || \
-    (DSHMAP_LOAD_FACTOR_DEN / 8 == DSHMAP_LOAD_FACTOR_NUM && \
-     DSHMAP_LOAD_FACTOR_DEN % 8 != 0)
+#if DSHMAP_DISABLE_SIMD != 0 && DSHMAP_DISABLE_SIMD != 1
+#error "DSHMAP_DISABLE_SIMD must be 0 or 1"
+#endif
+#if DSHMAP_LOAD_FACTOR_DEN / DSHMAP__GROUP_WIDTH > DSHMAP_LOAD_FACTOR_NUM || \
+    (DSHMAP_LOAD_FACTOR_DEN / DSHMAP__GROUP_WIDTH == DSHMAP_LOAD_FACTOR_NUM && \
+     DSHMAP_LOAD_FACTOR_DEN % DSHMAP__GROUP_WIDTH != 0)
+#if DSHMAP__GROUP_WIDTH == 8
 #error "DSHMAP_LOAD_FACTOR_NUM / DSHMAP_LOAD_FACTOR_DEN must be at least 1/8"
+#else
+#error "DSHMAP_LOAD_FACTOR_NUM / DSHMAP_LOAD_FACTOR_DEN must be at least 1/16"
+#endif
 #endif
 
 /* DSHMAP_MALLOC / DSHMAP_FREE - Allocation hooks.
@@ -150,16 +227,16 @@ typedef dshmap_hash_t (*dshmap_hash_fn)(const void *entry);
  */
 typedef bool (*dshmap_key_eq_fn)(const void *entry, const void *key);
 
-/* dshmap - A dense-to-Swiss hash map.
+/* dshmap - A small-chained-to-Swiss hash map.
  *
  * Stores non-NULL void pointers to caller-owned entries. Entries are
  * located by hash; the caller provides a hash function that can
  * recompute the hash from an entry pointer. NULL entries are not
  * supported because NULL is used as the lookup miss result.
- * Tables use a simple dense open-addressed layout up to
- * DSHMAP_DENSE_THRESHOLD entries, then promote to the Swiss layout.
- * Full-hash storage can be configured per layout with
- * DSHMAP_DENSE_STORE_HASHES and DSHMAP_SWISS_STORE_HASHES.
+ * Tables use a pooled chained layout up to DSHMAP_SMALL_THRESHOLD
+ * entries, then promote to the Swiss layout. Swiss full-hash storage can
+ * be configured with DSHMAP_SWISS_STORE_HASHES. Small mode always stores
+ * full hashes.
  * Promotion is one-way. A promoted table stays Swiss until destroy.
  *
  * The struct fields are visible so the type can be stack allocated, but
@@ -176,14 +253,14 @@ typedef bool (*dshmap_key_eq_fn)(const void *entry, const void *key);
  *     dshmap_init(&map, my_hash);
  */
 typedef struct dshmap {
-    int8_t *ctrl;         /* H2 tag per slot; empty=0x80, deleted=0xFE */
-    void **slots;         /* one entry pointer per slot */
-    dshmap_hash_t *hashes; /* stored full hashes, if enabled */
+    int8_t *ctrl;         /* Swiss control bytes, or small allocation base */
+    void **slots;         /* Swiss slots, or small node pool */
+    dshmap_hash_t *hashes; /* stored Swiss full hashes, if enabled */
     dshmap_hash_fn hash_fn; /* recompute hashes when needed */
-    size_t size;          /* number of occupied slots */
-    size_t group_mask;    /* num_groups - 1, for H1 & group_mask */
-    size_t growth_left;   /* inserts remaining before resize */
-    bool dense;           /* using the dense layout */
+    size_t size;          /* number of entries */
+    size_t group_mask;    /* Swiss groups - 1, or small buckets - 1 */
+    size_t growth_left;   /* Swiss growth left, or small free-list head */
+    bool small;           /* using the small chained layout */
 } dshmap;
 
 /* dshmap_iter - Cursor for iterating all entries.
@@ -230,7 +307,7 @@ dshmap_destroy(dshmap *map);
  *
  * Entry pointers are discarded but not freed; the caller owns those.
  * The table keeps its allocated capacity so subsequent inserts avoid
- * reallocation. clear does not demote a Swiss table back to dense mode.
+ * reallocation. clear does not demote a Swiss table back to small mode.
  *
  *     dshmap_clear(&map);
  *     assert(dshmap_is_empty(&map));
@@ -244,7 +321,7 @@ dshmap_clear(dshmap *map);
  * No-op if the table can already hold 'count' entries without resizing.
  * Call this before a batch of inserts to allocate once upfront instead
  * of resizing repeatedly as the table grows. Reserving more than
- * DSHMAP_DENSE_THRESHOLD entries promotes the table to Swiss mode.
+ * DSHMAP_SMALL_THRESHOLD entries promotes the table to Swiss mode.
  * Promotion is one-way.
  *
  *     dshmap_reserve(&map, n);
@@ -489,17 +566,42 @@ dshmap_iter_next_after(const dshmap *map, const void *entry);
 enum {
     DSHMAP__EMPTY   = (int8_t)0x80,
     DSHMAP__DELETED = (int8_t)0xFE,
-    DSHMAP__DENSE_LOAD_NUM = 3,
-    DSHMAP__DENSE_LOAD_DEN = 4,
 };
+
+#define DSHMAP__SMALL_END ((size_t)-1)
+
+typedef struct dshmap__small_node {
+    dshmap_hash_t hash;
+    void *entry;
+    size_t next;
+} dshmap__small_node;
+
+typedef uint64_t dshmap__ctrl_mask;
+
+#if DSHMAP__BACKEND_X86
+typedef __m128i dshmap__ctrl_group;
+#elif DSHMAP__BACKEND_NEON
+typedef int8x16_t dshmap__ctrl_group;
+#else
+typedef uint64_t dshmap__ctrl_group;
 
 static const uint64_t DSHMAP__BROADCAST_BYTE = 0x0101010101010101ULL;
 static const uint64_t DSHMAP__HIGH_BITS      = 0x8080808080808080ULL;
+#endif
 
-static const int8_t dshmap__empty_ctrl[8] = {
+#if DSHMAP__GROUP_WIDTH == 16
+static const int8_t dshmap__empty_ctrl[DSHMAP__GROUP_WIDTH] = {
+    DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY,
+    DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY,
     DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY,
     DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY,
 };
+#else
+static const int8_t dshmap__empty_ctrl[DSHMAP__GROUP_WIDTH] = {
+    DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY,
+    DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY, DSHMAP__EMPTY,
+};
+#endif
 
 static inline dshmap_hash_t dshmap__h1(dshmap_hash_t hash) { return hash >> 7; }
 static inline uint8_t dshmap__h2(dshmap_hash_t hash) { return hash & 0x7F; }
@@ -507,7 +609,7 @@ static inline uint8_t dshmap__h2(dshmap_hash_t hash) { return hash & 0x7F; }
 static inline size_t
 dshmap__slot_pos(size_t group_index, size_t slot)
 {
-    return group_index * 8 + slot;
+    return group_index * DSHMAP__GROUP_WIDTH + slot;
 }
 
 static inline size_t
@@ -522,60 +624,181 @@ dshmap__next_group_index(const dshmap *map, size_t index, size_t probe)
     return (index + probe + 1) & map->group_mask;
 }
 
-static inline uint64_t
-dshmap__load_ctrl(const dshmap *map, size_t group_index)
-{
-    uint64_t ctrl;
-    memcpy(&ctrl, &map->ctrl[group_index * 8], 8);
-    return ctrl;
-}
-
 static inline size_t
-dshmap__match_slot(uint64_t mask)
+dshmap__match_slot(dshmap__ctrl_mask mask)
 {
-    return __builtin_ctzll(mask) / 8;
+#if DSHMAP__BACKEND_SWAR
+    return (size_t)__builtin_ctzll(mask) / 8;
+#else
+    return (size_t)__builtin_ctzll(mask);
+#endif
+}
+
+#if DSHMAP__BACKEND_X86
+static inline dshmap__ctrl_group
+dshmap__load_ctrl_from(const int8_t *ctrl, size_t group_index)
+{
+    return _mm_loadu_si128((const dshmap__ctrl_group *)(const void *)
+                           &ctrl[group_index * DSHMAP__GROUP_WIDTH]);
+}
+
+static inline dshmap__ctrl_mask
+dshmap__ctrl_available(dshmap__ctrl_group ctrl)
+{
+    return (dshmap__ctrl_mask)_mm_movemask_epi8(ctrl) &
+           DSHMAP__GROUP_MASK_BITS;
+}
+
+static inline dshmap__ctrl_mask
+dshmap__ctrl_occupied(dshmap__ctrl_group ctrl)
+{
+    return ~(dshmap__ctrl_mask)_mm_movemask_epi8(ctrl) &
+           DSHMAP__GROUP_MASK_BITS;
+}
+
+static inline dshmap__ctrl_mask
+dshmap__ctrl_match(dshmap__ctrl_group ctrl, uint8_t h2)
+{
+    dshmap__ctrl_group match = _mm_cmpeq_epi8(ctrl,
+                                              _mm_set1_epi8((char)h2));
+    return (dshmap__ctrl_mask)_mm_movemask_epi8(match);
+}
+
+static inline dshmap__ctrl_mask
+dshmap__ctrl_deleted(dshmap__ctrl_group ctrl)
+{
+    dshmap__ctrl_group match = _mm_cmpeq_epi8(
+        ctrl, _mm_set1_epi8((char)DSHMAP__DELETED));
+    return (dshmap__ctrl_mask)_mm_movemask_epi8(match);
+}
+
+static inline dshmap__ctrl_mask
+dshmap__group_has_empty(dshmap__ctrl_group ctrl)
+{
+    dshmap__ctrl_group match = _mm_cmpeq_epi8(
+        ctrl, _mm_set1_epi8((char)DSHMAP__EMPTY));
+    return (dshmap__ctrl_mask)_mm_movemask_epi8(match);
+}
+#elif DSHMAP__BACKEND_NEON
+static inline dshmap__ctrl_group
+dshmap__load_ctrl_from(const int8_t *ctrl, size_t group_index)
+{
+    return vld1q_s8(&ctrl[group_index * DSHMAP__GROUP_WIDTH]);
+}
+
+static inline uint8_t
+dshmap__neon_sum_u8(uint8x8_t v)
+{
+    uint16x4_t sum16 = vpaddl_u8(v);
+    uint32x2_t sum32 = vpaddl_u16(sum16);
+    uint64x1_t sum64 = vpaddl_u32(sum32);
+    return (uint8_t)vget_lane_u64(sum64, 0);
+}
+
+static inline dshmap__ctrl_mask
+dshmap__neon_movemask(uint8x16_t v)
+{
+    static const uint8_t bitmask_data[DSHMAP__GROUP_WIDTH] = {
+        1, 2, 4, 8, 16, 32, 64, 128,
+        1, 2, 4, 8, 16, 32, 64, 128,
+    };
+    uint8x16_t bits = vmulq_u8(vshrq_n_u8(v, 7),
+                               vld1q_u8(bitmask_data));
+    return (dshmap__ctrl_mask)dshmap__neon_sum_u8(vget_low_u8(bits)) |
+           ((dshmap__ctrl_mask)dshmap__neon_sum_u8(vget_high_u8(bits)) << 8);
+}
+
+static inline dshmap__ctrl_mask
+dshmap__ctrl_available(dshmap__ctrl_group ctrl)
+{
+    return dshmap__neon_movemask(vreinterpretq_u8_s8(ctrl));
+}
+
+static inline dshmap__ctrl_mask
+dshmap__ctrl_occupied(dshmap__ctrl_group ctrl)
+{
+    return ~dshmap__neon_movemask(vreinterpretq_u8_s8(ctrl)) &
+           DSHMAP__GROUP_MASK_BITS;
+}
+
+static inline dshmap__ctrl_mask
+dshmap__ctrl_match(dshmap__ctrl_group ctrl, uint8_t h2)
+{
+    return dshmap__neon_movemask(vceqq_s8(ctrl, vdupq_n_s8((int8_t)h2)));
+}
+
+static inline dshmap__ctrl_mask
+dshmap__ctrl_deleted(dshmap__ctrl_group ctrl)
+{
+    return dshmap__neon_movemask(
+        vceqq_s8(ctrl, vdupq_n_s8((int8_t)DSHMAP__DELETED)));
+}
+
+static inline dshmap__ctrl_mask
+dshmap__group_has_empty(dshmap__ctrl_group ctrl)
+{
+    return dshmap__neon_movemask(
+        vceqq_s8(ctrl, vdupq_n_s8((int8_t)DSHMAP__EMPTY)));
+}
+#else
+static inline dshmap__ctrl_group
+dshmap__load_ctrl_from(const int8_t *ctrl, size_t group_index)
+{
+    dshmap__ctrl_group group;
+    memcpy(&group, &ctrl[group_index * DSHMAP__GROUP_WIDTH], sizeof group);
+    return group;
 }
 
 static inline uint64_t
-dshmap__ctrl_available(uint64_t ctrl)
+dshmap__swar_match8(uint64_t ctrl, uint8_t byte)
+{
+    uint64_t match = ctrl ^ (DSHMAP__BROADCAST_BYTE * byte);
+    return (match - DSHMAP__BROADCAST_BYTE) & ~match & DSHMAP__HIGH_BITS;
+}
+
+static inline dshmap__ctrl_mask
+dshmap__ctrl_available(dshmap__ctrl_group ctrl)
 {
     return ctrl & DSHMAP__HIGH_BITS;
 }
 
-static inline uint64_t
-dshmap__ctrl_occupied(uint64_t ctrl)
+static inline dshmap__ctrl_mask
+dshmap__ctrl_occupied(dshmap__ctrl_group ctrl)
 {
     return ~ctrl & DSHMAP__HIGH_BITS;
 }
 
-static inline uint64_t
-dshmap__ctrl_match(uint64_t ctrl, uint8_t h2)
+static inline dshmap__ctrl_mask
+dshmap__ctrl_match(dshmap__ctrl_group ctrl, uint8_t h2)
 {
-    uint64_t match = ctrl ^ (DSHMAP__BROADCAST_BYTE * h2);
-    match = (match - DSHMAP__BROADCAST_BYTE) & ~match & DSHMAP__HIGH_BITS;
-    return match;
+    return dshmap__swar_match8(ctrl, h2);
 }
 
-static inline uint64_t
-dshmap__ctrl_deleted(uint64_t ctrl)
+static inline dshmap__ctrl_mask
+dshmap__ctrl_deleted(dshmap__ctrl_group ctrl)
 {
-    uint64_t match = ctrl ^ (DSHMAP__BROADCAST_BYTE * (uint8_t)DSHMAP__DELETED);
-    match = (match - DSHMAP__BROADCAST_BYTE) & ~match & DSHMAP__HIGH_BITS;
-    return match;
+    return dshmap__swar_match8(ctrl, (uint8_t)DSHMAP__DELETED);
+}
+
+static inline dshmap__ctrl_mask
+dshmap__group_has_empty(dshmap__ctrl_group ctrl)
+{
+    return (ctrl & ~(ctrl << 1)) & DSHMAP__HIGH_BITS;
+}
+#endif
+
+static inline dshmap__ctrl_group
+dshmap__load_ctrl(const dshmap *map, size_t group_index)
+{
+    return dshmap__load_ctrl_from(map->ctrl, group_index);
 }
 
 static inline size_t
-dshmap__ctrl_next_match(uint64_t *match)
+dshmap__ctrl_next_match(dshmap__ctrl_mask *match)
 {
     size_t slot = dshmap__match_slot(*match);
     *match &= *match - 1;
     return slot;
-}
-
-static inline uint64_t
-dshmap__group_has_empty(uint64_t ctrl)
-{
-    return (ctrl & ~(ctrl << 1)) & DSHMAP__HIGH_BITS;
 }
 
 static inline bool
@@ -585,9 +808,9 @@ dshmap__is_allocated(const dshmap *map)
 }
 
 static inline bool
-dshmap__is_dense(const dshmap *map)
+dshmap__is_small(const dshmap *map)
 {
-    return map->dense;
+    return map->small;
 }
 
 static inline void
@@ -618,7 +841,7 @@ dshmap__checked_mul(size_t a, size_t b)
 static inline size_t
 dshmap__capacity_from_groups(size_t groups)
 {
-    return dshmap__checked_mul(groups, 8);
+    return dshmap__checked_mul(groups, DSHMAP__GROUP_WIDTH);
 }
 
 static inline size_t
@@ -633,26 +856,37 @@ dshmap__growth_left_for_cap(size_t cap)
 }
 
 static inline size_t
-dshmap__dense_growth_left_for_cap(size_t cap)
+dshmap__small_capacity(const dshmap *map)
 {
-    size_t q = cap / DSHMAP__DENSE_LOAD_DEN;
-    size_t r = cap % DSHMAP__DENSE_LOAD_DEN;
-    size_t whole = dshmap__checked_mul(q, DSHMAP__DENSE_LOAD_NUM);
-    size_t rem = dshmap__checked_mul(r, DSHMAP__DENSE_LOAD_NUM) /
-                 DSHMAP__DENSE_LOAD_DEN;
-    return dshmap__checked_add(whole, rem);
+    return map->group_mask + 1;
+}
+
+static inline size_t *
+dshmap__small_buckets(const dshmap *map)
+{
+    return (size_t *)(void *)map->ctrl;
+}
+
+static inline dshmap__small_node *
+dshmap__small_nodes(const dshmap *map)
+{
+    return (dshmap__small_node *)(void *)map->slots;
 }
 
 static inline size_t
-dshmap__dense_capacity(const dshmap *map)
+dshmap__small_bucket_index(const dshmap *map, dshmap_hash_t hash)
 {
-    return (map->group_mask + 1) * 8;
+    return hash & map->group_mask;
 }
 
 static inline size_t
-dshmap__dense_mask(const dshmap *map)
+dshmap__small_cap_for_count(size_t count)
 {
-    return (map->group_mask << 3) | 7;
+    size_t cap = 1;
+    while (cap < count) {
+        cap = dshmap__checked_mul(cap, 2);
+    }
+    return cap;
 }
 
 static inline dshmap_hash_t
@@ -673,23 +907,6 @@ dshmap__set_slot_hash(dshmap *map, size_t pos, dshmap_hash_t hash)
 }
 
 static inline size_t
-dshmap__dense_growth_left(const dshmap *map)
-{
-    return dshmap__dense_growth_left_for_cap(dshmap__dense_capacity(map)) -
-           map->size;
-}
-
-static inline size_t
-dshmap__dense_cap_for_count(size_t count)
-{
-    size_t cap = 8;
-    while (dshmap__dense_growth_left_for_cap(cap) < count) {
-        cap = dshmap__checked_mul(cap, 2);
-    }
-    return cap;
-}
-
-static inline size_t
 dshmap__groups_for_count(size_t count, size_t groups)
 {
     while (dshmap__growth_left_for_cap(
@@ -700,7 +917,8 @@ dshmap__groups_for_count(size_t count, size_t groups)
 }
 
 #define DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) \
-    for (uint64_t ctrl = 0, index##_init_ = 1; index##_init_; index##_init_ = 0) \
+    for (dshmap__ctrl_group ctrl, *index##_ctrl_once_ = &ctrl; \
+         index##_ctrl_once_; index##_ctrl_once_ = NULL) \
     for (size_t index = dshmap__group_index(map, hash), index##_probe_ = 0; \
          index##_probe_ <= (map)->group_mask && (ctrl = dshmap__load_ctrl(map, index), 1); \
          index = dshmap__next_group_index(map, index, index##_probe_++))
@@ -716,7 +934,7 @@ dshmap__swiss_alloc(dshmap *map, size_t cap)
 #endif
     size_t slots_bytes = dshmap__checked_mul(cap, sizeof(void *));
     size_t alloc_size = dshmap__checked_add(slots_off, slots_bytes);
-    char *mem = DSHMAP_MALLOC(alloc_size);
+    char *mem = (char *)DSHMAP_MALLOC(alloc_size);
     if (!mem) {
         dshmap__oom();
     }
@@ -728,36 +946,37 @@ dshmap__swiss_alloc(dshmap *map, size_t cap)
 #else
     map->hashes = NULL;
 #endif
-    map->dense = false;
+    map->small = false;
 }
 
 static inline void
-dshmap__dense_alloc(dshmap *map, size_t cap)
+dshmap__small_alloc(dshmap *map, size_t cap)
 {
-    size_t slots_off = cap;
-#if DSHMAP_DENSE_STORE_HASHES
-    size_t hashes_off = cap;
-    size_t hashes_bytes = dshmap__checked_mul(cap, sizeof(dshmap_hash_t));
-    slots_off = dshmap__checked_add(hashes_off, hashes_bytes);
-#endif
-    size_t slots_bytes = dshmap__checked_mul(cap, sizeof(void *));
-    size_t alloc_size = dshmap__checked_add(slots_off, slots_bytes);
-    char *mem = DSHMAP_MALLOC(alloc_size);
+    size_t buckets_bytes = dshmap__checked_mul(cap, sizeof(size_t));
+    size_t nodes_off = buckets_bytes;
+    size_t nodes_bytes = dshmap__checked_mul(cap, sizeof(dshmap__small_node));
+    size_t alloc_size = dshmap__checked_add(nodes_off, nodes_bytes);
+    char *mem = (char *)DSHMAP_MALLOC(alloc_size);
     if (!mem) {
         dshmap__oom();
     }
     map->ctrl = (int8_t *)mem;
-    memset(map->ctrl, DSHMAP__EMPTY, cap);
-#if DSHMAP_DENSE_STORE_HASHES
-    map->hashes = (dshmap_hash_t *)(mem + hashes_off);
-#else
+    size_t *buckets = dshmap__small_buckets(map);
+    for (size_t i = 0; i < cap; i++) {
+        buckets[i] = DSHMAP__SMALL_END;
+    }
     map->hashes = NULL;
-#endif
-    map->slots = (void **)(mem + slots_off);
-    map->group_mask = cap / 8 - 1;
+    map->slots = (void **)(void *)(mem + nodes_off);
+    dshmap__small_node *nodes = dshmap__small_nodes(map);
+    for (size_t i = 0; i < cap; i++) {
+        nodes[i].hash = 0;
+        nodes[i].entry = NULL;
+        nodes[i].next = i + 1 < cap ? i + 1 : DSHMAP__SMALL_END;
+    }
+    map->group_mask = cap - 1;
     map->size = 0;
-    map->growth_left = dshmap__dense_growth_left_for_cap(cap);
-    map->dense = true;
+    map->growth_left = 0;
+    map->small = true;
 }
 
 static inline void
@@ -766,7 +985,7 @@ dshmap__swiss_insert_no_grow(dshmap *map, void *entry, dshmap_hash_t hash)
     uint8_t h2 = dshmap__h2(hash);
 
     DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
-        uint64_t empty = dshmap__group_has_empty(ctrl);
+        dshmap__ctrl_mask empty = dshmap__group_has_empty(ctrl);
         if (DSHMAP__LIKELY(empty)) {
             size_t pos = dshmap__slot_pos(index, dshmap__match_slot(empty));
             map->ctrl[pos] = (int8_t)h2;
@@ -797,11 +1016,10 @@ dshmap__swiss_grow_to(dshmap *map, size_t new_groups)
     map->growth_left = dshmap__growth_left_for_cap(new_cap);
 
     if (was_allocated) {
-        size_t old_groups_n = old_cap / 8;
+        size_t old_groups_n = old_cap / DSHMAP__GROUP_WIDTH;
         for (size_t g = 0; g < old_groups_n; g++) {
-            uint64_t ctrl;
-            memcpy(&ctrl, &old_ctrl[g * 8], 8);
-            uint64_t occ = dshmap__ctrl_occupied(ctrl);
+            dshmap__ctrl_group ctrl = dshmap__load_ctrl_from(old_ctrl, g);
+            dshmap__ctrl_mask occ = dshmap__ctrl_occupied(ctrl);
             while (occ) {
                 size_t pos = dshmap__slot_pos(g, dshmap__ctrl_next_match(&occ));
                 dshmap_hash_t hash = old_hashes != NULL ?
@@ -828,52 +1046,53 @@ dshmap__swiss_grow(dshmap *map)
 }
 
 static inline void
-dshmap__dense_insert_no_grow(dshmap *map, void *entry, dshmap_hash_t hash)
+dshmap__small_insert_no_grow(dshmap *map, void *entry, dshmap_hash_t hash)
 {
-    size_t mask = dshmap__dense_mask(map);
-    size_t pos = hash & mask;
-    while (map->ctrl[pos] != DSHMAP__EMPTY) {
-        pos = (pos + 1) & mask;
+    size_t index = map->growth_left;
+    size_t bucket = dshmap__small_bucket_index(map, hash);
+    size_t *buckets = dshmap__small_buckets(map);
+    dshmap__small_node *nodes = dshmap__small_nodes(map);
+
+    if (DSHMAP__UNLIKELY(index == DSHMAP__SMALL_END)) {
+        dshmap__oom();
     }
-    map->ctrl[pos] = (int8_t)dshmap__h2(hash);
-    dshmap__set_slot_hash(map, pos, hash);
-    map->slots[pos] = entry;
+    map->growth_left = nodes[index].next;
+    nodes[index].hash = hash;
+    nodes[index].entry = entry;
+    nodes[index].next = buckets[bucket];
+    buckets[bucket] = index;
     map->size++;
-    map->growth_left = dshmap__dense_growth_left(map);
 }
 
 static inline void
-dshmap__dense_grow_to(dshmap *map, size_t new_cap)
+dshmap__small_grow_to(dshmap *map, size_t new_cap)
 {
-    size_t old_cap = dshmap__dense_capacity(map);
-    int8_t *old_ctrl = map->ctrl;
-    void **old_slots = map->slots;
-    dshmap_hash_t *old_hashes = map->hashes;
+    size_t old_cap = dshmap__small_capacity(map);
+    int8_t *old_base = map->ctrl;
+    dshmap__small_node *old_nodes = dshmap__small_nodes(map);
 
-    dshmap__dense_alloc(map, new_cap);
+    dshmap__small_alloc(map, new_cap);
     for (size_t i = 0; i < old_cap; i++) {
-        if (old_ctrl[i] != DSHMAP__EMPTY) {
-            dshmap_hash_t hash = old_hashes != NULL ?
-                old_hashes[i] : map->hash_fn(old_slots[i]);
-            dshmap__dense_insert_no_grow(map, old_slots[i], hash);
+        if (old_nodes[i].entry != NULL) {
+            dshmap__small_insert_no_grow(
+                map, old_nodes[i].entry, old_nodes[i].hash);
         }
     }
-    DSHMAP_FREE(old_ctrl);
+    DSHMAP_FREE(old_base);
 }
 
 static inline void
-dshmap__dense_grow_for_count(dshmap *map, size_t count)
+dshmap__small_grow_for_count(dshmap *map, size_t count)
 {
-    dshmap__dense_grow_to(map, dshmap__dense_cap_for_count(count));
+    dshmap__small_grow_to(map, dshmap__small_cap_for_count(count));
 }
 
 static inline void
 dshmap__promote_to_swiss(dshmap *map, size_t count)
 {
-    size_t old_cap = dshmap__dense_capacity(map);
-    int8_t *old_ctrl = map->ctrl;
-    void **old_slots = map->slots;
-    dshmap_hash_t *old_hashes = map->hashes;
+    size_t old_cap = dshmap__small_capacity(map);
+    int8_t *old_base = map->ctrl;
+    dshmap__small_node *old_nodes = dshmap__small_nodes(map);
 
     size_t new_groups = dshmap__groups_for_count(count, 1);
     dshmap__swiss_alloc(map, dshmap__capacity_from_groups(new_groups));
@@ -883,41 +1102,25 @@ dshmap__promote_to_swiss(dshmap *map, size_t count)
         dshmap__capacity_from_groups(new_groups));
 
     for (size_t i = 0; i < old_cap; i++) {
-        if (old_ctrl[i] != DSHMAP__EMPTY) {
-            dshmap_hash_t hash = old_hashes != NULL ?
-                old_hashes[i] : map->hash_fn(old_slots[i]);
-            dshmap__swiss_insert_no_grow(map, old_slots[i], hash);
+        if (old_nodes[i].entry != NULL) {
+            dshmap__swiss_insert_no_grow(
+                map, old_nodes[i].entry, old_nodes[i].hash);
         }
     }
-    DSHMAP_FREE(old_ctrl);
+    DSHMAP_FREE(old_base);
 }
 
 static inline void
-dshmap__dense_erase_at(dshmap *map, size_t hole)
+dshmap__small_erase_at(dshmap *map, size_t index, size_t *link)
 {
-    size_t mask = dshmap__dense_mask(map);
-    size_t pos = (hole + 1) & mask;
+    dshmap__small_node *nodes = dshmap__small_nodes(map);
 
-    while (map->ctrl[pos] != DSHMAP__EMPTY) {
-        size_t ideal = dshmap__slot_hash(map, pos) & mask;
-        if (((hole - ideal) & mask) < ((pos - ideal) & mask)) {
-            map->ctrl[hole] = map->ctrl[pos];
-            if (map->hashes != NULL) {
-                map->hashes[hole] = map->hashes[pos];
-            }
-            map->slots[hole] = map->slots[pos];
-            hole = pos;
-        }
-        pos = (pos + 1) & mask;
-    }
-
-    map->ctrl[hole] = DSHMAP__EMPTY;
-    map->slots[hole] = NULL;
-    if (map->hashes != NULL) {
-        map->hashes[hole] = 0;
-    }
+    *link = nodes[index].next;
+    nodes[index].hash = 0;
+    nodes[index].entry = NULL;
+    nodes[index].next = map->growth_left;
     map->size--;
-    map->growth_left = dshmap__dense_growth_left(map);
+    map->growth_left = index;
 }
 
 static inline void
@@ -927,9 +1130,10 @@ dshmap__swiss_insert(dshmap *map, void *entry, dshmap_hash_t hash)
 
     if (DSHMAP__UNLIKELY(map->growth_left == 0)) {
         DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
-            uint64_t deleted = dshmap__ctrl_deleted(ctrl);
+            dshmap__ctrl_mask deleted = dshmap__ctrl_deleted(ctrl);
             if (deleted) {
-                size_t pos = dshmap__slot_pos(index, dshmap__match_slot(deleted));
+                size_t pos = dshmap__slot_pos(
+                    index, dshmap__match_slot(deleted));
                 map->ctrl[pos] = (int8_t)h2;
                 dshmap__set_slot_hash(map, pos, hash);
                 map->slots[pos] = entry;
@@ -945,7 +1149,7 @@ dshmap__swiss_insert(dshmap *map, void *entry, dshmap_hash_t hash)
     }
 
     DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
-        uint64_t available = dshmap__ctrl_available(ctrl);
+        dshmap__ctrl_mask available = dshmap__ctrl_available(ctrl);
         if (DSHMAP__LIKELY(available)) {
             size_t pos = dshmap__slot_pos(index, dshmap__match_slot(available));
             bool was_empty = (map->ctrl[pos] == DSHMAP__EMPTY);
@@ -975,7 +1179,7 @@ dshmap_init(dshmap *map, dshmap_hash_fn hash_fn)
     map->size = 0;
     map->group_mask = 0;
     map->growth_left = 0;
-    map->dense = false;
+    map->small = false;
 }
 
 static inline void
@@ -991,11 +1195,20 @@ dshmap_destroy(dshmap *map)
 static inline void
 dshmap_clear(dshmap *map)
 {
-    if (dshmap__is_dense(map)) {
-        size_t cap = dshmap__dense_capacity(map);
-        memset(map->ctrl, DSHMAP__EMPTY, cap);
+    if (dshmap__is_small(map)) {
+        size_t cap = dshmap__small_capacity(map);
+        size_t *buckets = dshmap__small_buckets(map);
+        for (size_t i = 0; i < cap; i++) {
+            buckets[i] = DSHMAP__SMALL_END;
+        }
+        memset(dshmap__small_nodes(map), 0,
+               dshmap__checked_mul(cap, sizeof(dshmap__small_node)));
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        for (size_t i = 0; i < cap; i++) {
+            nodes[i].next = i + 1 < cap ? i + 1 : DSHMAP__SMALL_END;
+        }
         map->size = 0;
-        map->growth_left = dshmap__dense_growth_left_for_cap(cap);
+        map->growth_left = 0;
     } else {
         if (dshmap__is_allocated(map)) {
             size_t cap = dshmap__capacity_from_groups(
@@ -1010,21 +1223,21 @@ dshmap_clear(dshmap *map)
 static inline void
 dshmap_reserve(dshmap *map, size_t count)
 {
-    if (DSHMAP_DENSE_THRESHOLD != 0 && count <= DSHMAP_DENSE_THRESHOLD &&
+    if (DSHMAP_SMALL_THRESHOLD != 0 && count <= DSHMAP_SMALL_THRESHOLD &&
         !dshmap__is_allocated(map)) {
         if (count == 0) {
             return;
         }
-        dshmap__dense_alloc(map, dshmap__dense_cap_for_count(count));
+        dshmap__small_alloc(map, dshmap__small_cap_for_count(count));
         return;
     }
 
-    if (dshmap__is_dense(map)) {
-        if (count <= DSHMAP_DENSE_THRESHOLD) {
-            if (count <= map->size + map->growth_left) {
+    if (dshmap__is_small(map)) {
+        if (count <= DSHMAP_SMALL_THRESHOLD) {
+            if (count <= dshmap__small_capacity(map)) {
                 return;
             }
-            dshmap__dense_grow_for_count(map, count);
+            dshmap__small_grow_for_count(map, count);
             return;
         }
         dshmap__promote_to_swiss(map, count);
@@ -1074,6 +1287,18 @@ dshmap_iter_next(const dshmap *map, dshmap_iter *iter)
         return NULL;
     }
 
+    if (dshmap__is_small(map)) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        size_t cap = dshmap__small_capacity(map);
+        while (iter->group < cap) {
+            void *entry = nodes[iter->group++].entry;
+            if (entry != NULL) {
+                return entry;
+            }
+        }
+        return NULL;
+    }
+
     for (;;) {
         if (iter->occupied) {
             size_t group = iter->group - 1;
@@ -1099,8 +1324,25 @@ dshmap_iter_next_after(const dshmap *map, const void *entry)
         return NULL;
     }
 
+    if (dshmap__is_small(map)) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        size_t cap = dshmap__small_capacity(map);
+        for (size_t i = 0; i < cap; i++) {
+            if (nodes[i].entry == NULL) {
+                continue;
+            }
+            if (found) {
+                return nodes[i].entry;
+            }
+            if (nodes[i].entry == entry) {
+                found = true;
+            }
+        }
+        return NULL;
+    }
+
     for (size_t group = 0; group <= map->group_mask; group++) {
-        uint64_t occupied = dshmap__ctrl_occupied(
+        dshmap__ctrl_mask occupied = dshmap__ctrl_occupied(
             dshmap__load_ctrl(map, group));
         while (occupied) {
             size_t pos = dshmap__slot_pos(
@@ -1119,29 +1361,29 @@ dshmap_iter_next_after(const dshmap *map, const void *entry)
 static inline void *
 dshmap__iter_next_safe(const dshmap *map, dshmap_iter *iter, const void *entry)
 {
-    return dshmap__is_dense(map) ? dshmap_iter_next_after(map, entry)
+    return dshmap__is_small(map) ? dshmap_iter_next_after(map, entry)
                                  : dshmap_iter_next(map, iter);
 }
 
 static inline void
 dshmap_insert(dshmap *map, void *entry, dshmap_hash_t hash)
 {
-    if (dshmap__is_dense(map)) {
+    if (dshmap__is_small(map)) {
         size_t count = dshmap__checked_add(map->size, 1);
-        if (DSHMAP__UNLIKELY(count > DSHMAP_DENSE_THRESHOLD)) {
+        if (DSHMAP__UNLIKELY(count > DSHMAP_SMALL_THRESHOLD)) {
             dshmap__promote_to_swiss(map, count);
             dshmap__swiss_insert_no_grow(map, entry, hash);
         } else {
-            if (DSHMAP__UNLIKELY(map->growth_left == 0)) {
-                dshmap__dense_grow_for_count(map, count);
+            if (DSHMAP__UNLIKELY(count > dshmap__small_capacity(map))) {
+                dshmap__small_grow_for_count(map, count);
             }
-            dshmap__dense_insert_no_grow(map, entry, hash);
+            dshmap__small_insert_no_grow(map, entry, hash);
         }
     } else {
         if (DSHMAP__UNLIKELY(!dshmap__is_allocated(map)) &&
-            DSHMAP_DENSE_THRESHOLD != 0) {
-            dshmap__dense_alloc(map, dshmap__dense_cap_for_count(1));
-            dshmap__dense_insert_no_grow(map, entry, hash);
+            DSHMAP_SMALL_THRESHOLD != 0) {
+            dshmap__small_alloc(map, dshmap__small_cap_for_count(1));
+            dshmap__small_insert_no_grow(map, entry, hash);
         } else {
             dshmap__swiss_insert(map, entry, hash);
         }
@@ -1151,20 +1393,21 @@ dshmap_insert(dshmap *map, void *entry, dshmap_hash_t hash)
 static inline void *
 dshmap_find(const dshmap *map, dshmap_hash_t hash)
 {
-    if (dshmap__is_dense(map)) {
-        size_t mask = dshmap__dense_mask(map);
-        size_t pos = hash & mask;
-        while (map->ctrl[pos] != DSHMAP__EMPTY) {
-            if (dshmap__slot_hash(map, pos) == hash) {
-                return map->slots[pos];
+    if (dshmap__is_small(map)) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        size_t index = dshmap__small_buckets(map)[
+            dshmap__small_bucket_index(map, hash)];
+        while (index != DSHMAP__SMALL_END) {
+            if (nodes[index].hash == hash) {
+                return nodes[index].entry;
             }
-            pos = (pos + 1) & mask;
+            index = nodes[index].next;
         }
         return NULL;
     } else {
         uint8_t h2 = dshmap__h2(hash);
         DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
-            uint64_t match = dshmap__ctrl_match(ctrl, h2);
+            dshmap__ctrl_mask match = dshmap__ctrl_match(ctrl, h2);
             while (match) {
                 size_t pos = dshmap__slot_pos(index,
                                               dshmap__ctrl_next_match(&match));
@@ -1184,26 +1427,27 @@ dshmap_find(const dshmap *map, dshmap_hash_t hash)
 static inline void *
 dshmap_find_next(const dshmap *map, dshmap_hash_t hash, const void *prev)
 {
-    if (dshmap__is_dense(map)) {
+    if (dshmap__is_small(map)) {
         bool found_prev = false;
-        size_t mask = dshmap__dense_mask(map);
-        size_t pos = hash & mask;
-        while (map->ctrl[pos] != DSHMAP__EMPTY) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        size_t index = dshmap__small_buckets(map)[
+            dshmap__small_bucket_index(map, hash)];
+        while (index != DSHMAP__SMALL_END) {
             if (!found_prev) {
-                if (map->slots[pos] == prev) {
+                if (nodes[index].entry == prev) {
                     found_prev = true;
                 }
-            } else if (dshmap__slot_hash(map, pos) == hash) {
-                return map->slots[pos];
+            } else if (nodes[index].hash == hash) {
+                return nodes[index].entry;
             }
-            pos = (pos + 1) & mask;
+            index = nodes[index].next;
         }
         return NULL;
     } else {
         uint8_t h2 = dshmap__h2(hash);
         bool found_prev = false;
         DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
-            uint64_t match = dshmap__ctrl_match(ctrl, h2);
+            dshmap__ctrl_mask match = dshmap__ctrl_match(ctrl, h2);
             while (match) {
                 size_t pos = dshmap__slot_pos(index,
                                               dshmap__ctrl_next_match(&match));
@@ -1230,23 +1474,21 @@ static inline void *
 dshmap_find_key(const dshmap *map, dshmap_hash_t hash, const void *key,
                dshmap_key_eq_fn eq_fn)
 {
-    if (dshmap__is_dense(map)) {
-        int8_t h2 = (int8_t)dshmap__h2(hash);
-        size_t mask = dshmap__dense_mask(map);
-        size_t pos = hash & mask;
-        while (map->ctrl[pos] != DSHMAP__EMPTY) {
-            if ((map->hashes != NULL ? map->hashes[pos] == hash :
-                 map->ctrl[pos] == h2) &&
-                eq_fn(map->slots[pos], key)) {
-                return map->slots[pos];
+    if (dshmap__is_small(map)) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        size_t index = dshmap__small_buckets(map)[
+            dshmap__small_bucket_index(map, hash)];
+        while (index != DSHMAP__SMALL_END) {
+            if (nodes[index].hash == hash && eq_fn(nodes[index].entry, key)) {
+                return nodes[index].entry;
             }
-            pos = (pos + 1) & mask;
+            index = nodes[index].next;
         }
         return NULL;
     } else {
         uint8_t h2 = dshmap__h2(hash);
         DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
-            uint64_t match = dshmap__ctrl_match(ctrl, h2);
+            dshmap__ctrl_mask match = dshmap__ctrl_match(ctrl, h2);
             while (match) {
                 size_t pos = dshmap__slot_pos(index,
                                               dshmap__ctrl_next_match(&match));
@@ -1268,29 +1510,28 @@ static inline void *
 dshmap_find_key_next(const dshmap *map, dshmap_hash_t hash, const void *key,
                     dshmap_key_eq_fn eq_fn, const void *prev)
 {
-    if (dshmap__is_dense(map)) {
+    if (dshmap__is_small(map)) {
         bool found_prev = false;
-        int8_t h2 = (int8_t)dshmap__h2(hash);
-        size_t mask = dshmap__dense_mask(map);
-        size_t pos = hash & mask;
-        while (map->ctrl[pos] != DSHMAP__EMPTY) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        size_t index = dshmap__small_buckets(map)[
+            dshmap__small_bucket_index(map, hash)];
+        while (index != DSHMAP__SMALL_END) {
             if (!found_prev) {
-                if (map->slots[pos] == prev) {
+                if (nodes[index].entry == prev) {
                     found_prev = true;
                 }
-            } else if ((map->hashes != NULL ? map->hashes[pos] == hash :
-                        map->ctrl[pos] == h2) &&
-                       eq_fn(map->slots[pos], key)) {
-                return map->slots[pos];
+            } else if (nodes[index].hash == hash &&
+                       eq_fn(nodes[index].entry, key)) {
+                return nodes[index].entry;
             }
-            pos = (pos + 1) & mask;
+            index = nodes[index].next;
         }
         return NULL;
     } else {
         uint8_t h2 = dshmap__h2(hash);
         bool found_prev = false;
         DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
-            uint64_t match = dshmap__ctrl_match(ctrl, h2);
+            dshmap__ctrl_mask match = dshmap__ctrl_match(ctrl, h2);
             while (match) {
                 size_t pos = dshmap__slot_pos(index,
                                               dshmap__ctrl_next_match(&match));
@@ -1317,28 +1558,29 @@ dshmap_find_key_next(const dshmap *map, dshmap_hash_t hash, const void *key,
 static inline void
 dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash)
 {
-    if (dshmap__is_dense(map)) {
-        size_t mask = dshmap__dense_mask(map);
-        size_t pos = hash & mask;
-        while (map->ctrl[pos] != DSHMAP__EMPTY) {
-            if (dshmap__slot_hash(map, pos) == hash &&
-                map->slots[pos] == entry) {
-                dshmap__dense_erase_at(map, pos);
+    if (dshmap__is_small(map)) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        size_t *link = &dshmap__small_buckets(map)[
+            dshmap__small_bucket_index(map, hash)];
+        while (*link != DSHMAP__SMALL_END) {
+            size_t index = *link;
+            if (nodes[index].hash == hash && nodes[index].entry == entry) {
+                dshmap__small_erase_at(map, index, link);
                 return;
             }
-            pos = (pos + 1) & mask;
+            link = &nodes[index].next;
         }
         return;
     } else {
         uint8_t h2 = dshmap__h2(hash);
         DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
-            uint64_t match = dshmap__ctrl_match(ctrl, h2);
+            dshmap__ctrl_mask match = dshmap__ctrl_match(ctrl, h2);
             while (match) {
                 size_t pos = dshmap__slot_pos(index,
                                               dshmap__ctrl_next_match(&match));
                 if ((map->hashes == NULL || map->hashes[pos] == hash) &&
                     map->slots[pos] == entry) {
-                    uint64_t empty = dshmap__group_has_empty(ctrl);
+                    dshmap__ctrl_mask empty = dshmap__group_has_empty(ctrl);
                     map->ctrl[pos] = empty ? DSHMAP__EMPTY : DSHMAP__DELETED;
                     if (map->hashes != NULL) {
                         map->hashes[pos] = 0;

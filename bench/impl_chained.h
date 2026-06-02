@@ -14,6 +14,11 @@ struct chained_slot {
 struct chained_hmap {
     struct chained_slot **buckets;
     struct chained_slot *one;
+    struct chained_slot *pool;
+    struct chained_slot *free_list;
+    size_t pool_cap;
+    size_t pool_next;
+    size_t heap_count;
     size_t mask;
     size_t n;
 };
@@ -23,8 +28,47 @@ chained_init(struct chained_hmap *hm)
 {
     hm->one = NULL;
     hm->buckets = &hm->one;
+    hm->pool = NULL;
+    hm->free_list = NULL;
+    hm->pool_cap = 0;
+    hm->pool_next = 0;
+    hm->heap_count = 0;
     hm->mask = 0;
     hm->n = 0;
+}
+
+static bool
+chained_slot_is_pooled(const struct chained_hmap *hm,
+                       const struct chained_slot *s)
+{
+    return hm->pool != NULL && s >= hm->pool && s < hm->pool + hm->pool_cap;
+}
+
+static struct chained_slot *
+chained_alloc_slot(struct chained_hmap *hm)
+{
+    if (hm->free_list != NULL) {
+        struct chained_slot *s = hm->free_list;
+        hm->free_list = s->next;
+        return s;
+    }
+    if (hm->pool_next < hm->pool_cap)
+        return &hm->pool[hm->pool_next++];
+
+    hm->heap_count++;
+    return malloc(sizeof(struct chained_slot));
+}
+
+static void
+chained_release_slot(struct chained_hmap *hm, struct chained_slot *s)
+{
+    if (chained_slot_is_pooled(hm, s)) {
+        s->next = hm->free_list;
+        hm->free_list = s;
+    } else {
+        hm->heap_count--;
+        free(s);
+    }
 }
 
 static void
@@ -34,7 +78,7 @@ chained_clear(struct chained_hmap *hm)
         struct chained_slot *s = hm->buckets[i];
         while (s) {
             struct chained_slot *next = s->next;
-            free(s);
+            chained_release_slot(hm, s);
             s = next;
         }
         hm->buckets[i] = NULL;
@@ -48,7 +92,13 @@ chained_destroy(struct chained_hmap *hm)
     chained_clear(hm);
     if (hm->buckets != &hm->one)
         free(hm->buckets);
+    free(hm->pool);
     hm->buckets = &hm->one;
+    hm->pool = NULL;
+    hm->free_list = NULL;
+    hm->pool_cap = 0;
+    hm->pool_next = 0;
+    hm->heap_count = 0;
     hm->mask = 0;
 }
 
@@ -81,7 +131,9 @@ chained_insert(struct chained_hmap *hm, void *entry, size_t hash)
     if (hm->n > hm->mask)
         chained_resize(hm, (hm->mask + 1) * 2);
 
-    struct chained_slot *s = malloc(sizeof(*s));
+    struct chained_slot *s = chained_alloc_slot(hm);
+    if (!s)
+        abort();
     s->hash = hash;
     s->entry = entry;
     size_t idx = hash & hm->mask;
@@ -101,6 +153,18 @@ chained_find(const struct chained_hmap *hm, size_t hash)
     return NULL;
 }
 
+static void *
+chained_find_key(const struct chained_hmap *hm, size_t hash, const void *key,
+                 bench_key_eq_fn eq_fn)
+{
+    size_t idx = hash & hm->mask;
+    for (struct chained_slot *s = hm->buckets[idx]; s; s = s->next) {
+        if (s->hash == hash && eq_fn(s->entry, key))
+            return s->entry;
+    }
+    return NULL;
+}
+
 static void
 chained_remove(struct chained_hmap *hm, const void *entry, size_t hash)
 {
@@ -110,7 +174,7 @@ chained_remove(struct chained_hmap *hm, const void *entry, size_t hash)
         struct chained_slot *s = *pp;
         if (s->entry == entry) {
             *pp = s->next;
-            free(s);
+            chained_release_slot(hm, s);
             hm->n--;
             return;
         }
@@ -121,14 +185,23 @@ chained_remove(struct chained_hmap *hm, const void *entry, size_t hash)
 static void
 chained_reserve(struct chained_hmap *hm, size_t count)
 {
-    if (count <= hm->mask + 1)
-        return;
-    size_t new_cap = hm->mask + 1;
-    if (new_cap == 0)
-        new_cap = 1;
-    while (new_cap < count)
-        new_cap *= 2;
-    chained_resize(hm, new_cap);
+    if (count > hm->mask + 1) {
+        size_t new_cap = hm->mask + 1;
+        while (new_cap < count)
+            new_cap *= 2;
+        chained_resize(hm, new_cap);
+    }
+
+    if (count > hm->pool_cap && hm->n == 0) {
+        free(hm->pool);
+        hm->pool = calloc(count, sizeof(*hm->pool));
+        if (!hm->pool)
+            abort();
+        hm->pool_cap = count;
+        hm->pool_next = 0;
+        hm->free_list = NULL;
+        hm->heap_count = 0;
+    }
 }
 
 /* --- vtable wrappers --- */
@@ -156,6 +229,14 @@ static void *
 impl_chained_find(const void *ctx, bench_hash_t hash)
 {
     return chained_find((const struct chained_hmap *)ctx, hash);
+}
+
+static void *
+impl_chained_find_key(const void *ctx, bench_hash_t hash, const void *key,
+                      bench_key_eq_fn eq_fn)
+{
+    return chained_find_key((const struct chained_hmap *)ctx, hash, key,
+                            eq_fn);
 }
 
 static void
@@ -197,7 +278,7 @@ impl_chained_memory_usage(const void *ctx)
 {
     const struct chained_hmap *hm = (const struct chained_hmap *)ctx;
     return (hm->mask + 1) * sizeof(struct chained_slot *)
-           + hm->n * sizeof(struct chained_slot);
+           + (hm->pool_cap + hm->heap_count) * sizeof(struct chained_slot);
 }
 
 static const bench_impl impl_chained = {
@@ -207,6 +288,7 @@ static const bench_impl impl_chained = {
     .destroy      = impl_chained_destroy,
     .insert       = impl_chained_insert,
     .find         = impl_chained_find,
+    .find_key     = impl_chained_find_key,
     .remove       = impl_chained_remove,
     .reserve      = impl_chained_reserve,
     .size         = impl_chained_size,

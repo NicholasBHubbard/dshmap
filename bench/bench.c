@@ -14,11 +14,15 @@
 #include "bench_impl.h"
 #include "impl_dshmap.h"
 #include "impl_chained.h"
+#include "impl_packed.h"
+#include "impl_flat.h"
 
 #define DO_NOT_OPTIMIZE(val) __asm__ volatile("" : "+r"(val) :: "memory")
 #define COMPILER_BARRIER()   __asm__ volatile("" ::: "memory")
 
 #define DEFAULT_MIN_TOTAL_OPS 200000
+#define MIXED_ITER_SCANS 8
+#define MIXED_MIN_ITER_PERIOD 64
 
 #ifndef PERF_IOC_FLAG_GROUP
 #define PERF_IOC_FLAG_GROUP (1U << 0)
@@ -68,7 +72,12 @@ struct bench_options {
     size_t *sizes;
     size_t n_sizes;
     size_t sizes_cap;
+    char **impl_names;
+    char *impl_names_storage;
+    size_t n_impl_names;
+    size_t impl_names_cap;
     size_t min_total_ops;
+    size_t samples;
     uint32_t op_mask;
     enum bench_key_mode key_mode;
     enum output_mode mode;
@@ -76,6 +85,7 @@ struct bench_options {
 };
 
 static size_t min_total_ops = DEFAULT_MIN_TOTAL_OPS;
+static size_t bench_samples = 7;
 
 /* --- PRNG --- */
 
@@ -108,11 +118,14 @@ struct bench_entry {
 struct bench_keys {
     enum bench_key_mode mode;
     bench_hash_fn hash_fn;
+    bench_key_eq_fn eq_fn;
     struct bench_entry *entries;
+    struct bench_entry *miss_entries;
     void **ptrs;
     bench_hash_t *hashes;
     void **ptrs_shuffled;
     bench_hash_t *hashes_shuffled;
+    void **ptrs_miss;
     bench_hash_t *hashes_miss;
 };
 
@@ -189,6 +202,20 @@ bench_hash_expensive(const void *entry)
     return (bench_hash_t)h;
 }
 
+static bool
+bench_eq_ptr(const void *entry, const void *key)
+{
+    return entry == key;
+}
+
+static bool
+bench_eq_string(const void *entry, const void *key)
+{
+    const struct bench_entry *a = entry;
+    const struct bench_entry *b = key;
+    return a->len == b->len && memcmp(a->text, b->text, a->len) == 0;
+}
+
 static bench_hash_fn
 bench_hash_fn_for_mode(enum bench_key_mode mode)
 {
@@ -205,6 +232,43 @@ bench_hash_fn_for_mode(enum bench_key_mode mode)
     abort();
 }
 
+static bench_key_eq_fn
+bench_eq_fn_for_mode(enum bench_key_mode mode)
+{
+    switch (mode) {
+    case BENCH_KEYS_PTR:
+        return bench_eq_ptr;
+    case BENCH_KEYS_STRING:
+    case BENCH_KEYS_EXPENSIVE:
+        return bench_eq_string;
+    case BENCH_KEYS_COUNT:
+        break;
+    }
+    abort();
+}
+
+static uint64_t
+bench_domain_value(size_t index, uint64_t domain)
+{
+    uint64_t v = mix64((uint64_t)index + domain);
+    if (domain & (1ULL << 63))
+        return v | (1ULL << 63);
+    v &= ~(1ULL << 63);
+    return v ? v : 2;
+}
+
+static uint64_t
+bench_present_value(size_t index)
+{
+    return bench_domain_value(index, 0x243f6a8885a308d3ULL);
+}
+
+static uint64_t
+bench_missing_value(size_t index)
+{
+    return bench_domain_value(index, 0x9e3779b97f4a7c15ULL | (1ULL << 63));
+}
+
 static void
 bench_make_key(enum bench_key_mode mode, bench_hash_fn hash_fn,
                uint64_t value, struct bench_entry *entry,
@@ -219,18 +283,6 @@ bench_make_key(enum bench_key_mode mode, bench_hash_fn hash_fn,
     bench_entry_init(entry, value);
     *ptr = entry;
     *hash = hash_fn(entry);
-}
-
-static bench_hash_t
-bench_make_miss_hash(enum bench_key_mode mode, bench_hash_fn hash_fn,
-                     uint64_t value)
-{
-    struct bench_entry entry;
-    void *ptr;
-    bench_hash_t hash;
-
-    bench_make_key(mode, hash_fn, value, &entry, &ptr, &hash);
-    return hash;
 }
 
 static void
@@ -255,17 +307,21 @@ bench_keys_init(struct bench_keys *keys, enum bench_key_mode mode, size_t n)
 {
     keys->mode = mode;
     keys->hash_fn = bench_hash_fn_for_mode(mode);
+    keys->eq_fn = bench_eq_fn_for_mode(mode);
     keys->entries = mode == BENCH_KEYS_PTR ? NULL :
         xmalloc(n * sizeof(*keys->entries));
+    keys->miss_entries = mode == BENCH_KEYS_PTR ? NULL :
+        xmalloc(n * sizeof(*keys->miss_entries));
     keys->ptrs = xmalloc(n * sizeof(*keys->ptrs));
     keys->hashes = xmalloc(n * sizeof(*keys->hashes));
     keys->ptrs_shuffled = xmalloc(n * sizeof(*keys->ptrs_shuffled));
     keys->hashes_shuffled = xmalloc(n * sizeof(*keys->hashes_shuffled));
+    keys->ptrs_miss = xmalloc(n * sizeof(*keys->ptrs_miss));
     keys->hashes_miss = xmalloc(n * sizeof(*keys->hashes_miss));
 
     for (size_t i = 0; i < n; i++) {
         struct bench_entry *entry = keys->entries ? &keys->entries[i] : NULL;
-        bench_make_key(mode, keys->hash_fn, rng_next() | 1, entry,
+        bench_make_key(mode, keys->hash_fn, bench_present_value(i), entry,
                        &keys->ptrs[i], &keys->hashes[i]);
     }
 
@@ -273,19 +329,24 @@ bench_keys_init(struct bench_keys *keys, enum bench_key_mode mode, size_t n)
     memcpy(keys->hashes_shuffled, keys->hashes, n * sizeof(*keys->hashes));
     shuffle_pairs(keys->ptrs_shuffled, keys->hashes_shuffled, n);
 
-    for (size_t i = 0; i < n; i++)
-        keys->hashes_miss[i] = bench_make_miss_hash(mode, keys->hash_fn,
-                                                    rng_next() | 1);
+    for (size_t i = 0; i < n; i++) {
+        struct bench_entry *entry = keys->miss_entries ?
+            &keys->miss_entries[i] : NULL;
+        bench_make_key(mode, keys->hash_fn, bench_missing_value(i), entry,
+                       &keys->ptrs_miss[i], &keys->hashes_miss[i]);
+    }
 }
 
 static void
 bench_keys_destroy(struct bench_keys *keys)
 {
     free(keys->entries);
+    free(keys->miss_entries);
     free(keys->ptrs);
     free(keys->hashes);
     free(keys->ptrs_shuffled);
     free(keys->hashes_shuffled);
+    free(keys->ptrs_miss);
     free(keys->hashes_miss);
 }
 
@@ -438,6 +499,35 @@ struct bench_result {
     uint64_t counters[NUM_HW_COUNTERS];
 };
 
+struct bench_sample {
+    uint64_t elapsed_ns;
+    uint64_t counters[NUM_HW_COUNTERS];
+};
+
+static int
+bench_sample_cmp(const void *a_, const void *b_)
+{
+    const struct bench_sample *a = a_;
+    const struct bench_sample *b = b_;
+
+    if (a->elapsed_ns < b->elapsed_ns)
+        return -1;
+    if (a->elapsed_ns > b->elapsed_ns)
+        return 1;
+    return 0;
+}
+
+static void
+bench_result_set_median(struct bench_result *r, size_t n_ops,
+                        struct bench_sample *samples, size_t n_samples)
+{
+    qsort(samples, n_samples, sizeof(*samples), bench_sample_cmp);
+    struct bench_sample *median = &samples[n_samples / 2];
+    r->n_ops = n_ops;
+    r->elapsed_ns = median->elapsed_ns;
+    memcpy(r->counters, median->counters, sizeof(r->counters));
+}
+
 static void
 print_header(void)
 {
@@ -527,6 +617,38 @@ iter_nop(void *entry, void *arg)
     DO_NOT_OPTIMIZE(entry);
 }
 
+struct iter_counter {
+    size_t n;
+};
+
+static void
+iter_count(void *entry, void *arg)
+{
+    struct iter_counter *counter = arg;
+
+    DO_NOT_OPTIMIZE(entry);
+    counter->n++;
+}
+
+static size_t
+count_iterated_entries(const bench_impl *impl, void *ctx)
+{
+    struct iter_counter counter = {0};
+
+    impl->for_each(ctx, iter_count, &counter);
+    return counter.n;
+}
+
+static size_t
+mixed_iter_period(size_t n)
+{
+    size_t period = n / MIXED_ITER_SCANS;
+
+    if (period < MIXED_MIN_ITER_PERIOD)
+        period = n < MIXED_MIN_ITER_PERIOD ? n : MIXED_MIN_ITER_PERIOD;
+    return period ? period : 1;
+}
+
 /* --- Benchmarks --- */
 
 static struct bench_result
@@ -538,40 +660,49 @@ bench_insert_seq(const bench_impl *impl, size_t n,
     size_t iters = calc_iters(n);
 
     void *ctx = alloc_ctx(impl, hash_fn);
+    if (impl->reserve)
+        impl->reserve(ctx, n);
     for (size_t i = 0; i < n; i++)
         impl->insert(ctx, entries[i], hashes[i]);
     free_ctx(impl, ctx);
 
-    uint64_t total_ns = 0;
-    uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
+    struct bench_sample *samples = xmalloc(bench_samples * sizeof(*samples));
+    for (size_t sample = 0; sample < bench_samples; sample++) {
+        uint64_t total_ns = 0;
+        uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
 
-    for (size_t iter = 0; iter < iters; iter++) {
-        ctx = alloc_ctx(impl, hash_fn);
+        for (size_t iter = 0; iter < iters; iter++) {
+            ctx = alloc_ctx(impl, hash_fn);
+            if (impl->reserve)
+                impl->reserve(ctx, n);
 
-        perf_group_reset(pg);
-        perf_group_enable(pg);
-        uint64_t t0 = time_ns();
-        COMPILER_BARRIER();
+            perf_group_reset(pg);
+            perf_group_enable(pg);
+            uint64_t t0 = time_ns();
+            COMPILER_BARRIER();
 
-        for (size_t i = 0; i < n; i++)
-            impl->insert(ctx, entries[i], hashes[i]);
+            for (size_t i = 0; i < n; i++)
+                impl->insert(ctx, entries[i], hashes[i]);
 
-        COMPILER_BARRIER();
-        uint64_t t1 = time_ns();
-        perf_group_disable(pg);
+            COMPILER_BARRIER();
+            uint64_t t1 = time_ns();
+            perf_group_disable(pg);
 
-        uint64_t ctr[NUM_HW_COUNTERS];
-        perf_group_read(pg, ctr);
-        total_ns += t1 - t0;
-        for (int c = 0; c < NUM_HW_COUNTERS; c++)
-            total_ctr[c] += ctr[c];
+            uint64_t ctr[NUM_HW_COUNTERS];
+            perf_group_read(pg, ctr);
+            total_ns += t1 - t0;
+            for (int c = 0; c < NUM_HW_COUNTERS; c++)
+                total_ctr[c] += ctr[c];
 
-        free_ctx(impl, ctx);
+            free_ctx(impl, ctx);
+        }
+
+        samples[sample].elapsed_ns = total_ns;
+        memcpy(samples[sample].counters, total_ctr, sizeof(total_ctr));
     }
 
-    res.n_ops = n * iters;
-    res.elapsed_ns = total_ns;
-    memcpy(res.counters, total_ctr, sizeof(total_ctr));
+    bench_result_set_median(&res, n * iters, samples, bench_samples);
+    free(samples);
     return res;
 }
 
@@ -584,47 +715,58 @@ bench_insert_rnd(const bench_impl *impl, size_t n,
     size_t iters = calc_iters(n);
 
     void *ctx = alloc_ctx(impl, hash_fn);
+    if (impl->reserve)
+        impl->reserve(ctx, n);
     for (size_t i = 0; i < n; i++)
         impl->insert(ctx, entries_shuffled[i], hashes_shuffled[i]);
     free_ctx(impl, ctx);
 
-    uint64_t total_ns = 0;
-    uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
+    struct bench_sample *samples = xmalloc(bench_samples * sizeof(*samples));
+    for (size_t sample = 0; sample < bench_samples; sample++) {
+        uint64_t total_ns = 0;
+        uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
 
-    for (size_t iter = 0; iter < iters; iter++) {
-        ctx = alloc_ctx(impl, hash_fn);
+        for (size_t iter = 0; iter < iters; iter++) {
+            ctx = alloc_ctx(impl, hash_fn);
+            if (impl->reserve)
+                impl->reserve(ctx, n);
 
-        perf_group_reset(pg);
-        perf_group_enable(pg);
-        uint64_t t0 = time_ns();
-        COMPILER_BARRIER();
+            perf_group_reset(pg);
+            perf_group_enable(pg);
+            uint64_t t0 = time_ns();
+            COMPILER_BARRIER();
 
-        for (size_t i = 0; i < n; i++)
-            impl->insert(ctx, entries_shuffled[i], hashes_shuffled[i]);
+            for (size_t i = 0; i < n; i++)
+                impl->insert(ctx, entries_shuffled[i], hashes_shuffled[i]);
 
-        COMPILER_BARRIER();
-        uint64_t t1 = time_ns();
-        perf_group_disable(pg);
+            COMPILER_BARRIER();
+            uint64_t t1 = time_ns();
+            perf_group_disable(pg);
 
-        uint64_t ctr[NUM_HW_COUNTERS];
-        perf_group_read(pg, ctr);
-        total_ns += t1 - t0;
-        for (int c = 0; c < NUM_HW_COUNTERS; c++)
-            total_ctr[c] += ctr[c];
+            uint64_t ctr[NUM_HW_COUNTERS];
+            perf_group_read(pg, ctr);
+            total_ns += t1 - t0;
+            for (int c = 0; c < NUM_HW_COUNTERS; c++)
+                total_ctr[c] += ctr[c];
 
-        free_ctx(impl, ctx);
+            free_ctx(impl, ctx);
+        }
+
+        samples[sample].elapsed_ns = total_ns;
+        memcpy(samples[sample].counters, total_ctr, sizeof(total_ctr));
     }
 
-    res.n_ops = n * iters;
-    res.elapsed_ns = total_ns;
-    memcpy(res.counters, total_ctr, sizeof(total_ctr));
+    bench_result_set_median(&res, n * iters, samples, bench_samples);
+    free(samples);
     return res;
 }
 
 static struct bench_result
 bench_find_hit(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
                void *const *entries, const bench_hash_t *hashes,
-               const bench_hash_t *hashes_shuffled, struct perf_group *pg)
+               void *const *entries_shuffled,
+               const bench_hash_t *hashes_shuffled,
+               bench_key_eq_fn eq_fn, struct perf_group *pg)
 {
     struct bench_result res = { .name = "find_hit" };
     size_t iters = calc_iters(n);
@@ -633,38 +775,47 @@ bench_find_hit(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
     populate(impl, ctx, entries, hashes, n);
 
     for (size_t i = 0; i < n; i++) {
-        void *p = impl->find(ctx, hashes_shuffled[i]);
+        void *p = impl->find_key(ctx, hashes_shuffled[i],
+                                 entries_shuffled[i], eq_fn);
+        if (p != entries_shuffled[i])
+            abort();
         DO_NOT_OPTIMIZE(p);
     }
 
-    uint64_t total_ns = 0;
-    uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
+    struct bench_sample *samples = xmalloc(bench_samples * sizeof(*samples));
+    for (size_t sample = 0; sample < bench_samples; sample++) {
+        uint64_t total_ns = 0;
+        uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
 
-    for (size_t iter = 0; iter < iters; iter++) {
-        perf_group_reset(pg);
-        perf_group_enable(pg);
-        uint64_t t0 = time_ns();
-        COMPILER_BARRIER();
+        for (size_t iter = 0; iter < iters; iter++) {
+            perf_group_reset(pg);
+            perf_group_enable(pg);
+            uint64_t t0 = time_ns();
+            COMPILER_BARRIER();
 
-        for (size_t i = 0; i < n; i++) {
-            void *p = impl->find(ctx, hashes_shuffled[i]);
-            DO_NOT_OPTIMIZE(p);
+            for (size_t i = 0; i < n; i++) {
+                void *p = impl->find_key(ctx, hashes_shuffled[i],
+                                         entries_shuffled[i], eq_fn);
+                DO_NOT_OPTIMIZE(p);
+            }
+
+            COMPILER_BARRIER();
+            uint64_t t1 = time_ns();
+            perf_group_disable(pg);
+
+            uint64_t ctr[NUM_HW_COUNTERS];
+            perf_group_read(pg, ctr);
+            total_ns += t1 - t0;
+            for (int c = 0; c < NUM_HW_COUNTERS; c++)
+                total_ctr[c] += ctr[c];
         }
 
-        COMPILER_BARRIER();
-        uint64_t t1 = time_ns();
-        perf_group_disable(pg);
-
-        uint64_t ctr[NUM_HW_COUNTERS];
-        perf_group_read(pg, ctr);
-        total_ns += t1 - t0;
-        for (int c = 0; c < NUM_HW_COUNTERS; c++)
-            total_ctr[c] += ctr[c];
+        samples[sample].elapsed_ns = total_ns;
+        memcpy(samples[sample].counters, total_ctr, sizeof(total_ctr));
     }
 
-    res.n_ops = n * iters;
-    res.elapsed_ns = total_ns;
-    memcpy(res.counters, total_ctr, sizeof(total_ctr));
+    bench_result_set_median(&res, n * iters, samples, bench_samples);
+    free(samples);
 
     free_ctx(impl, ctx);
     return res;
@@ -673,7 +824,9 @@ bench_find_hit(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
 static struct bench_result
 bench_find_miss(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
                 void *const *entries, const bench_hash_t *hashes,
-                const bench_hash_t *hashes_miss, struct perf_group *pg)
+                void *const *entries_miss,
+                const bench_hash_t *hashes_miss,
+                bench_key_eq_fn eq_fn, struct perf_group *pg)
 {
     struct bench_result res = { .name = "find_miss" };
     size_t iters = calc_iters(n);
@@ -682,38 +835,46 @@ bench_find_miss(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
     populate(impl, ctx, entries, hashes, n);
 
     for (size_t i = 0; i < n; i++) {
-        void *p = impl->find(ctx, hashes_miss[i]);
+        void *p = impl->find_key(ctx, hashes_miss[i], entries_miss[i], eq_fn);
+        if (p != NULL)
+            abort();
         DO_NOT_OPTIMIZE(p);
     }
 
-    uint64_t total_ns = 0;
-    uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
+    struct bench_sample *samples = xmalloc(bench_samples * sizeof(*samples));
+    for (size_t sample = 0; sample < bench_samples; sample++) {
+        uint64_t total_ns = 0;
+        uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
 
-    for (size_t iter = 0; iter < iters; iter++) {
-        perf_group_reset(pg);
-        perf_group_enable(pg);
-        uint64_t t0 = time_ns();
-        COMPILER_BARRIER();
+        for (size_t iter = 0; iter < iters; iter++) {
+            perf_group_reset(pg);
+            perf_group_enable(pg);
+            uint64_t t0 = time_ns();
+            COMPILER_BARRIER();
 
-        for (size_t i = 0; i < n; i++) {
-            void *p = impl->find(ctx, hashes_miss[i]);
-            DO_NOT_OPTIMIZE(p);
+            for (size_t i = 0; i < n; i++) {
+                void *p = impl->find_key(ctx, hashes_miss[i],
+                                         entries_miss[i], eq_fn);
+                DO_NOT_OPTIMIZE(p);
+            }
+
+            COMPILER_BARRIER();
+            uint64_t t1 = time_ns();
+            perf_group_disable(pg);
+
+            uint64_t ctr[NUM_HW_COUNTERS];
+            perf_group_read(pg, ctr);
+            total_ns += t1 - t0;
+            for (int c = 0; c < NUM_HW_COUNTERS; c++)
+                total_ctr[c] += ctr[c];
         }
 
-        COMPILER_BARRIER();
-        uint64_t t1 = time_ns();
-        perf_group_disable(pg);
-
-        uint64_t ctr[NUM_HW_COUNTERS];
-        perf_group_read(pg, ctr);
-        total_ns += t1 - t0;
-        for (int c = 0; c < NUM_HW_COUNTERS; c++)
-            total_ctr[c] += ctr[c];
+        samples[sample].elapsed_ns = total_ns;
+        memcpy(samples[sample].counters, total_ctr, sizeof(total_ctr));
     }
 
-    res.n_ops = n * iters;
-    res.elapsed_ns = total_ns;
-    memcpy(res.counters, total_ctr, sizeof(total_ctr));
+    bench_result_set_median(&res, n * iters, samples, bench_samples);
+    free(samples);
 
     free_ctx(impl, ctx);
     return res;
@@ -734,37 +895,42 @@ bench_remove_all(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
         impl->remove(ctx, entries_shuffled[i], hashes_shuffled[i]);
     free_ctx(impl, ctx);
 
-    uint64_t total_ns = 0;
-    uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
+    struct bench_sample *samples = xmalloc(bench_samples * sizeof(*samples));
+    for (size_t sample = 0; sample < bench_samples; sample++) {
+        uint64_t total_ns = 0;
+        uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
 
-    for (size_t iter = 0; iter < iters; iter++) {
-        ctx = alloc_ctx(impl, hash_fn);
-        populate(impl, ctx, entries, hashes, n);
+        for (size_t iter = 0; iter < iters; iter++) {
+            ctx = alloc_ctx(impl, hash_fn);
+            populate(impl, ctx, entries, hashes, n);
 
-        perf_group_reset(pg);
-        perf_group_enable(pg);
-        uint64_t t0 = time_ns();
-        COMPILER_BARRIER();
+            perf_group_reset(pg);
+            perf_group_enable(pg);
+            uint64_t t0 = time_ns();
+            COMPILER_BARRIER();
 
-        for (size_t i = 0; i < n; i++)
-            impl->remove(ctx, entries_shuffled[i], hashes_shuffled[i]);
+            for (size_t i = 0; i < n; i++)
+                impl->remove(ctx, entries_shuffled[i], hashes_shuffled[i]);
 
-        COMPILER_BARRIER();
-        uint64_t t1 = time_ns();
-        perf_group_disable(pg);
+            COMPILER_BARRIER();
+            uint64_t t1 = time_ns();
+            perf_group_disable(pg);
 
-        uint64_t ctr[NUM_HW_COUNTERS];
-        perf_group_read(pg, ctr);
-        total_ns += t1 - t0;
-        for (int c = 0; c < NUM_HW_COUNTERS; c++)
-            total_ctr[c] += ctr[c];
+            uint64_t ctr[NUM_HW_COUNTERS];
+            perf_group_read(pg, ctr);
+            total_ns += t1 - t0;
+            for (int c = 0; c < NUM_HW_COUNTERS; c++)
+                total_ctr[c] += ctr[c];
 
-        free_ctx(impl, ctx);
+            free_ctx(impl, ctx);
+        }
+
+        samples[sample].elapsed_ns = total_ns;
+        memcpy(samples[sample].counters, total_ctr, sizeof(total_ctr));
     }
 
-    res.n_ops = n * iters;
-    res.elapsed_ns = total_ns;
-    memcpy(res.counters, total_ctr, sizeof(total_ctr));
+    bench_result_set_median(&res, n * iters, samples, bench_samples);
+    free(samples);
     return res;
 }
 
@@ -781,31 +947,36 @@ bench_iterate(const bench_impl *impl, size_t n, bench_hash_fn hash_fn,
 
     impl->for_each(ctx, iter_nop, NULL);
 
-    uint64_t total_ns = 0;
-    uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
+    struct bench_sample *samples = xmalloc(bench_samples * sizeof(*samples));
+    for (size_t sample = 0; sample < bench_samples; sample++) {
+        uint64_t total_ns = 0;
+        uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
 
-    for (size_t iter = 0; iter < iters; iter++) {
-        perf_group_reset(pg);
-        perf_group_enable(pg);
-        uint64_t t0 = time_ns();
-        COMPILER_BARRIER();
+        for (size_t iter = 0; iter < iters; iter++) {
+            perf_group_reset(pg);
+            perf_group_enable(pg);
+            uint64_t t0 = time_ns();
+            COMPILER_BARRIER();
 
-        impl->for_each(ctx, iter_nop, NULL);
+            impl->for_each(ctx, iter_nop, NULL);
 
-        COMPILER_BARRIER();
-        uint64_t t1 = time_ns();
-        perf_group_disable(pg);
+            COMPILER_BARRIER();
+            uint64_t t1 = time_ns();
+            perf_group_disable(pg);
 
-        uint64_t ctr[NUM_HW_COUNTERS];
-        perf_group_read(pg, ctr);
-        total_ns += t1 - t0;
-        for (int c = 0; c < NUM_HW_COUNTERS; c++)
-            total_ctr[c] += ctr[c];
+            uint64_t ctr[NUM_HW_COUNTERS];
+            perf_group_read(pg, ctr);
+            total_ns += t1 - t0;
+            for (int c = 0; c < NUM_HW_COUNTERS; c++)
+                total_ctr[c] += ctr[c];
+        }
+
+        samples[sample].elapsed_ns = total_ns;
+        memcpy(samples[sample].counters, total_ctr, sizeof(total_ctr));
     }
 
-    res.n_ops = n * iters;
-    res.elapsed_ns = total_ns;
-    memcpy(res.counters, total_ctr, sizeof(total_ctr));
+    bench_result_set_median(&res, n * iters, samples, bench_samples);
+    free(samples);
 
     free_ctx(impl, ctx);
     return res;
@@ -819,6 +990,8 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
     size_t iters = calc_iters(n);
 
     size_t n_ops = n;
+    size_t iter_period = mixed_iter_period(n_ops);
+    size_t measured_ops = 0;
     size_t initial = (n + 1) / 2;
     size_t extra = n - initial;
 
@@ -831,31 +1004,37 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
     void **extra_ptrs = extra ? xmalloc(extra * sizeof(*extra_ptrs)) : NULL;
     bench_hash_t *extra_hashes = extra ?
         xmalloc(extra * sizeof(*extra_hashes)) : NULL;
+    void **live_ptrs = xmalloc(n * sizeof(*live_ptrs));
+    bench_hash_t *live_hashes = xmalloc(n * sizeof(*live_hashes));
 
     uint64_t saved_state = rng_state;
 
     for (size_t i = 0; i < extra; i++) {
         struct bench_entry *entry = extra_entries ? &extra_entries[i] : NULL;
-        bench_make_key(keys->mode, keys->hash_fn, rng_next() | 1, entry,
-                       &extra_ptrs[i], &extra_hashes[i]);
+        bench_make_key(keys->mode, keys->hash_fn,
+                       bench_present_value(n + i), entry, &extra_ptrs[i],
+                       &extra_hashes[i]);
     }
 
     size_t insert_count = 0;
-    size_t remove_count = 0;
+    size_t live_count = initial;
     for (size_t i = 0; i < n_ops; i++) {
         uint64_t r = rng_next() % 100;
-        if (r < 70) {
+        if (r < 70 && live_count > 0) {
             ops[i] = OP_FIND;
-            find_idx[i] = rng_next() % initial;
+            find_idx[i] = rng_next() % live_count;
         } else if (r < 90 && insert_count < extra) {
             ops[i] = OP_INSERT;
             find_idx[i] = insert_count++;
-        } else if (remove_count < initial) {
+            live_count++;
+        } else if (live_count > 0) {
             ops[i] = OP_REMOVE;
-            find_idx[i] = remove_count++;
+            find_idx[i] = rng_next() % live_count;
+            live_count--;
         } else {
-            ops[i] = OP_FIND;
-            find_idx[i] = rng_next() % initial;
+            ops[i] = OP_INSERT;
+            find_idx[i] = insert_count++;
+            live_count++;
         }
     }
 
@@ -864,75 +1043,120 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
         impl->reserve(ctx, initial + extra);
     for (size_t i = 0; i < initial; i++)
         impl->insert(ctx, keys->ptrs[i], keys->hashes[i]);
+    memcpy(live_ptrs, keys->ptrs, initial * sizeof(*live_ptrs));
+    memcpy(live_hashes, keys->hashes, initial * sizeof(*live_hashes));
+    live_count = initial;
 
     for (size_t i = 0; i < n_ops; i++) {
         switch (ops[i]) {
         case OP_FIND: {
-            void *p = impl->find(ctx, keys->hashes[find_idx[i]]);
+            size_t idx = find_idx[i];
+            void *p = impl->find_key(ctx, live_hashes[idx], live_ptrs[idx],
+                                     keys->eq_fn);
+            if (p != live_ptrs[idx])
+                abort();
             DO_NOT_OPTIMIZE(p);
             break;
         }
-        case OP_INSERT:
-            impl->insert(ctx, extra_ptrs[find_idx[i]],
-                         extra_hashes[find_idx[i]]);
+        case OP_INSERT: {
+            size_t idx = find_idx[i];
+            impl->insert(ctx, extra_ptrs[idx], extra_hashes[idx]);
+            live_ptrs[live_count] = extra_ptrs[idx];
+            live_hashes[live_count] = extra_hashes[idx];
+            live_count++;
             break;
-        case OP_REMOVE:
-            impl->remove(ctx, keys->ptrs[find_idx[i]],
-                         keys->hashes[find_idx[i]]);
+        }
+        case OP_REMOVE: {
+            size_t idx = find_idx[i];
+            impl->remove(ctx, live_ptrs[idx], live_hashes[idx]);
+            live_count--;
+            live_ptrs[idx] = live_ptrs[live_count];
+            live_hashes[idx] = live_hashes[live_count];
             break;
+        }
+        }
+        measured_ops++;
+
+        if ((i + 1) % iter_period == 0) {
+            size_t iterated = count_iterated_entries(impl, ctx);
+            if (iterated != live_count)
+                abort();
+            measured_ops += iterated;
         }
     }
     free_ctx(impl, ctx);
 
-    uint64_t total_ns = 0;
-    uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
+    struct bench_sample *samples = xmalloc(bench_samples * sizeof(*samples));
+    for (size_t sample = 0; sample < bench_samples; sample++) {
+        uint64_t total_ns = 0;
+        uint64_t total_ctr[NUM_HW_COUNTERS] = {0};
 
-    for (size_t iter = 0; iter < iters; iter++) {
-        ctx = alloc_ctx(impl, keys->hash_fn);
-        if (impl->reserve)
-            impl->reserve(ctx, initial + extra);
-        for (size_t i = 0; i < initial; i++)
-            impl->insert(ctx, keys->ptrs[i], keys->hashes[i]);
+        for (size_t iter = 0; iter < iters; iter++) {
+            ctx = alloc_ctx(impl, keys->hash_fn);
+            if (impl->reserve)
+                impl->reserve(ctx, initial + extra);
+            for (size_t i = 0; i < initial; i++)
+                impl->insert(ctx, keys->ptrs[i], keys->hashes[i]);
+            memcpy(live_ptrs, keys->ptrs, initial * sizeof(*live_ptrs));
+            memcpy(live_hashes, keys->hashes, initial * sizeof(*live_hashes));
+            live_count = initial;
 
-        perf_group_reset(pg);
-        perf_group_enable(pg);
-        uint64_t t0 = time_ns();
-        COMPILER_BARRIER();
+            perf_group_reset(pg);
+            perf_group_enable(pg);
+            uint64_t t0 = time_ns();
+            COMPILER_BARRIER();
 
-        for (size_t i = 0; i < n_ops; i++) {
-            switch (ops[i]) {
-            case OP_FIND: {
-                void *p = impl->find(ctx, keys->hashes[find_idx[i]]);
-                DO_NOT_OPTIMIZE(p);
-                break;
+            for (size_t i = 0; i < n_ops; i++) {
+                switch (ops[i]) {
+                case OP_FIND: {
+                    size_t idx = find_idx[i];
+                    void *p = impl->find_key(ctx, live_hashes[idx],
+                                             live_ptrs[idx], keys->eq_fn);
+                    DO_NOT_OPTIMIZE(p);
+                    break;
+                }
+                case OP_INSERT: {
+                    size_t idx = find_idx[i];
+                    impl->insert(ctx, extra_ptrs[idx], extra_hashes[idx]);
+                    live_ptrs[live_count] = extra_ptrs[idx];
+                    live_hashes[live_count] = extra_hashes[idx];
+                    live_count++;
+                    break;
+                }
+                case OP_REMOVE: {
+                    size_t idx = find_idx[i];
+                    impl->remove(ctx, live_ptrs[idx], live_hashes[idx]);
+                    live_count--;
+                    live_ptrs[idx] = live_ptrs[live_count];
+                    live_hashes[idx] = live_hashes[live_count];
+                    break;
+                }
+                }
+
+                if ((i + 1) % iter_period == 0)
+                    impl->for_each(ctx, iter_nop, NULL);
             }
-            case OP_INSERT:
-                impl->insert(ctx, extra_ptrs[find_idx[i]],
-                             extra_hashes[find_idx[i]]);
-                break;
-            case OP_REMOVE:
-                impl->remove(ctx, keys->ptrs[find_idx[i]],
-                             keys->hashes[find_idx[i]]);
-                break;
-            }
+
+            COMPILER_BARRIER();
+            uint64_t t1 = time_ns();
+            perf_group_disable(pg);
+
+            uint64_t ctr[NUM_HW_COUNTERS];
+            perf_group_read(pg, ctr);
+            total_ns += t1 - t0;
+            for (int c = 0; c < NUM_HW_COUNTERS; c++)
+                total_ctr[c] += ctr[c];
+
+            free_ctx(impl, ctx);
         }
 
-        COMPILER_BARRIER();
-        uint64_t t1 = time_ns();
-        perf_group_disable(pg);
-
-        uint64_t ctr[NUM_HW_COUNTERS];
-        perf_group_read(pg, ctr);
-        total_ns += t1 - t0;
-        for (int c = 0; c < NUM_HW_COUNTERS; c++)
-            total_ctr[c] += ctr[c];
-
-        free_ctx(impl, ctx);
+        samples[sample].elapsed_ns = total_ns;
+        memcpy(samples[sample].counters, total_ctr, sizeof(total_ctr));
     }
 
-    res.n_ops = n_ops * iters;
-    res.elapsed_ns = total_ns;
-    memcpy(res.counters, total_ctr, sizeof(total_ctr));
+    bench_result_set_median(&res, measured_ops * iters, samples,
+                            bench_samples);
+    free(samples);
 
     rng_state = saved_state;
     free(ops);
@@ -940,6 +1164,8 @@ bench_mixed(const bench_impl *impl, size_t n, const struct bench_keys *keys,
     free(extra_entries);
     free(extra_ptrs);
     free(extra_hashes);
+    free(live_ptrs);
+    free(live_hashes);
     return res;
 }
 
@@ -957,10 +1183,12 @@ run_operation(enum bench_op op, const bench_impl *impl, size_t n,
                                 keys->hashes_shuffled, pg);
     case BENCH_FIND_HIT:
         return bench_find_hit(impl, n, keys->hash_fn, keys->ptrs,
-                              keys->hashes, keys->hashes_shuffled, pg);
+                              keys->hashes, keys->ptrs_shuffled,
+                              keys->hashes_shuffled, keys->eq_fn, pg);
     case BENCH_FIND_MISS:
         return bench_find_miss(impl, n, keys->hash_fn, keys->ptrs,
-                               keys->hashes, keys->hashes_miss, pg);
+                               keys->hashes, keys->ptrs_miss,
+                               keys->hashes_miss, keys->eq_fn, pg);
     case BENCH_REMOVE:
         return bench_remove_all(impl, n, keys->hash_fn, keys->ptrs,
                                 keys->hashes, keys->ptrs_shuffled,
@@ -1075,6 +1303,8 @@ run_compare(size_t n, const bench_impl **impls, size_t n_impls,
     if (n_impls < 2)
         abort();
 
+    const bench_impl *baseline = impls[0];
+
     rng_seed(0xdeadbeefcafe1234ULL ^ n);
     struct bench_keys keys;
     bench_keys_init(&keys, opts->key_mode, n);
@@ -1083,14 +1313,20 @@ run_compare(size_t n, const bench_impl **impls, size_t n_impls,
         if (!op_enabled(opts->op_mask, op))
             continue;
 
-        struct bench_result dshmap = run_operation(op, impls[0], n, &keys, pg);
-        struct bench_result chained = run_operation(op, impls[1], n, &keys, pg);
-        double dshmap_ns = result_ns_per_op(&dshmap);
-        double chained_ns = result_ns_per_op(&chained);
-        const char *winner = dshmap_ns < chained_ns ? impls[0]->name : impls[1]->name;
-        printf("%8zu %-12s %10.3f %10.3f %8.3f %8s\n",
-               n, bench_op_names[op], dshmap_ns, chained_ns,
-               dshmap_ns / chained_ns, winner);
+        struct bench_result base = run_operation(op, baseline, n, &keys, pg);
+        double base_ns = result_ns_per_op(&base);
+
+        for (size_t impl_i = 1; impl_i < n_impls; impl_i++) {
+            const bench_impl *candidate = impls[impl_i];
+            struct bench_result cand = run_operation(op, candidate, n, &keys,
+                                                     pg);
+            double cand_ns = result_ns_per_op(&cand);
+            const char *winner = base_ns < cand_ns ? baseline->name
+                                                   : candidate->name;
+            printf("%8zu %-12s %-10s %-10s %10.3f %10.3f %9.3f %10s\n",
+                   n, bench_op_names[op], baseline->name, candidate->name,
+                   base_ns, cand_ns, base_ns / cand_ns, winner);
+        }
     }
 
     bench_keys_destroy(&keys);
@@ -1130,10 +1366,12 @@ usage(const char *prog, FILE *out)
             "  --linear A:B[:STEP]   add every STEP sizes from A through B\n"
             "  --geometric A:B[:MUL] add sizes A, A*MUL, ... through B\n"
             "  --keys MODE           key workload: ptr, string, expensive\n"
+            "  --impls LIST          implementations to run, in baseline order\n"
             "  --ops LIST            comma-separated operations or all\n"
-            "  --compare             print compact dshmap/chained comparison\n"
+            "  --compare             print compact dshmap/all comparison\n"
             "  --csv                 print machine-readable CSV rows\n"
             "  --min-ops N           target at least N operations per benchmark\n"
+            "  --samples N           report the median of N timed samples\n"
             "  --no-perf             skip hardware performance counters\n"
             "  --help                show this help\n"
             "\n"
@@ -1277,6 +1515,52 @@ parse_geometric(const char *prog, struct bench_options *opts, const char *arg)
     }
 }
 
+static void
+add_impl_name(struct bench_options *opts, char *name)
+{
+    if (opts->n_impl_names == opts->impl_names_cap) {
+        size_t new_cap = opts->impl_names_cap ? opts->impl_names_cap * 2 : 8;
+        char **new_names = realloc(opts->impl_names,
+                                   new_cap * sizeof(*new_names));
+        if (!new_names) {
+            fprintf(stderr, "bench: out of memory\n");
+            exit(1);
+        }
+        opts->impl_names = new_names;
+        opts->impl_names_cap = new_cap;
+    }
+    opts->impl_names[opts->n_impl_names++] = name;
+}
+
+static void
+parse_impls(const char *prog, struct bench_options *opts, const char *arg)
+{
+    if (opts->n_impl_names != 0)
+        die_usage(prog, "--impls may only be provided once");
+    if (*arg == '\0' || *arg == ',' || arg[strlen(arg) - 1] == ',')
+        die_usage(prog, "invalid --impls value");
+    for (const char *p = arg; *p; p++) {
+        if (p[0] == ',' && p[1] == ',')
+            die_usage(prog, "invalid --impls value");
+    }
+
+    char *copy = malloc(strlen(arg) + 1);
+    if (!copy) {
+        fprintf(stderr, "bench: out of memory\n");
+        exit(1);
+    }
+    strcpy(copy, arg);
+    opts->impl_names_storage = copy;
+
+    char *save = NULL;
+    for (char *tok = strtok_r(copy, ",", &save); tok;
+         tok = strtok_r(NULL, ",", &save)) {
+        add_impl_name(opts, tok);
+    }
+    if (opts->n_impl_names == 0)
+        die_usage(prog, "--impls must name at least one implementation");
+}
+
 static bool
 parse_op_name(const char *name, enum bench_op *op)
 {
@@ -1344,7 +1628,12 @@ parse_args(int argc, char **argv, struct bench_options *opts)
     opts->sizes = NULL;
     opts->n_sizes = 0;
     opts->sizes_cap = 0;
+    opts->impl_names = NULL;
+    opts->impl_names_storage = NULL;
+    opts->n_impl_names = 0;
+    opts->impl_names_cap = 0;
     opts->min_total_ops = DEFAULT_MIN_TOTAL_OPS;
+    opts->samples = 7;
     opts->op_mask = (1u << BENCH_OP_COUNT) - 1;
     opts->key_mode = BENCH_KEYS_PTR;
     opts->mode = OUTPUT_DETAIL;
@@ -1370,6 +1659,10 @@ parse_args(int argc, char **argv, struct bench_options *opts)
             if (++i == argc)
                 die_usage(argv[0], "--keys requires an argument");
             parse_key_mode(argv[0], opts, argv[i]);
+        } else if (strcmp(argv[i], "--impls") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--impls requires an argument");
+            parse_impls(argv[0], opts, argv[i]);
         } else if (strcmp(argv[i], "--ops") == 0) {
             if (++i == argc)
                 die_usage(argv[0], "--ops requires an argument");
@@ -1383,6 +1676,11 @@ parse_args(int argc, char **argv, struct bench_options *opts)
                 die_usage(argv[0], "--min-ops requires an argument");
             if (!parse_size_value(argv[i], &opts->min_total_ops))
                 die_usage(argv[0], "invalid --min-ops value");
+        } else if (strcmp(argv[i], "--samples") == 0) {
+            if (++i == argc)
+                die_usage(argv[0], "--samples requires an argument");
+            if (!parse_size_value(argv[i], &opts->samples))
+                die_usage(argv[0], "invalid --samples value");
         } else if (strcmp(argv[i], "--no-perf") == 0) {
             opts->use_perf = false;
         } else {
@@ -1400,6 +1698,7 @@ main(int argc, char **argv)
     struct bench_options opts;
     parse_args(argc, argv, &opts);
     min_total_ops = opts.min_total_ops;
+    bench_samples = opts.samples;
 
     if (opts.mode != OUTPUT_CSV) {
         printf("Hash Table Benchmark\n");
@@ -1417,15 +1716,47 @@ main(int argc, char **argv)
         printf("\nNOTE: Hardware perf counters unavailable; "
                "reporting wall time only.\n");
 
-    const bench_impl *impls[] = { &impl_dshmap, &impl_chained };
-    size_t n_impls = sizeof(impls) / sizeof(impls[0]);
+    const bench_impl *all_impls[] = {
+        &impl_dshmap,
+        &impl_chained,
+        &impl_packed,
+        &impl_flat,
+    };
+    const bench_impl **impls = all_impls;
+    size_t n_impls = sizeof(all_impls) / sizeof(all_impls[0]);
+    const bench_impl **selected_impls = NULL;
+
+    if (opts.n_impl_names != 0) {
+        selected_impls = xmalloc(opts.n_impl_names * sizeof(*selected_impls));
+        for (size_t name_i = 0; name_i < opts.n_impl_names; name_i++) {
+            bool found = false;
+            for (size_t impl_i = 0;
+                 impl_i < sizeof(all_impls) / sizeof(all_impls[0]);
+                 impl_i++) {
+                if (strcmp(opts.impl_names[name_i],
+                           all_impls[impl_i]->name) == 0) {
+                    selected_impls[name_i] = all_impls[impl_i];
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                fprintf(stderr, "bench: unknown implementation: %s\n",
+                        opts.impl_names[name_i]);
+                return 2;
+            }
+        }
+        impls = selected_impls;
+        n_impls = opts.n_impl_names;
+    }
 
     if (opts.mode == OUTPUT_COMPARE) {
-        printf("\n%8s %-12s %10s %10s %8s %8s\n",
-               "size", "operation", "dshmap", "chained", "ratio", "winner");
-        printf("%8s %-12s %10s %10s %8s %8s\n",
+        printf("\n%8s %-12s %-10s %-10s %10s %10s %9s %10s\n",
+               "size", "operation", "baseline", "candidate", "base ns",
+               "cand ns", "base/cand", "winner");
+        printf("%8s %-12s %-10s %-10s %10s %10s %9s %10s\n",
                "--------", "------------", "----------", "----------",
-               "--------", "--------");
+               "----------", "----------", "---------", "----------");
     } else if (opts.mode == OUTPUT_CSV) {
         print_csv_header();
     }
@@ -1444,5 +1775,8 @@ main(int argc, char **argv)
         printf("\n");
     perf_group_close(&pg);
     free(opts.sizes);
+    free(opts.impl_names_storage);
+    free(opts.impl_names);
+    free(selected_impls);
     return 0;
 }

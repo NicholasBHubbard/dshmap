@@ -4,6 +4,31 @@
 
 #include "../dshmap.h"
 
+#if DSHMAP_DISABLE_SIMD && !DSHMAP__BACKEND_SWAR
+#error "DSHMAP_DISABLE_SIMD must force the SWAR control backend"
+#endif
+#if DSHMAP_DISABLE_SIMD && DSHMAP__GROUP_WIDTH != 8
+#error "SWAR control backend must use 8-slot groups"
+#endif
+#if !DSHMAP_DISABLE_SIMD && defined(__GNUC__) && !defined(__clang__) && \
+    defined(__SSE2__) && !defined(__AVX2__) && !DSHMAP__BACKEND_SWAR
+#error "GCC x86 without AVX2 must default to the SWAR control backend"
+#endif
+#if !DSHMAP_DISABLE_SIMD && defined(__AVX2__) && defined(__SSE2__) && \
+    !DSHMAP__BACKEND_X86
+#error "AVX2 x86 targets must use the x86 SIMD control backend"
+#endif
+#if !DSHMAP_DISABLE_SIMD && defined(__clang__) && defined(__SSE2__) && \
+    !DSHMAP__BACKEND_X86
+#error "Clang x86 targets must use the x86 SIMD control backend"
+#endif
+#if (DSHMAP__BACKEND_X86 || DSHMAP__BACKEND_NEON) && DSHMAP__GROUP_WIDTH != 16
+#error "SIMD control backends must use 16-slot groups"
+#endif
+#if DSHMAP__BACKEND_SWAR && DSHMAP__GROUP_WIDTH != 8
+#error "SWAR control backend must use 8-slot groups"
+#endif
+
 #define RUN_TEST(fn) do { printf("  %-40s ", #fn); fn(); printf("ok\n"); } while (0)
 
 static dshmap_hash_t
@@ -25,6 +50,19 @@ fill_until_growth_left_zero(dshmap *map, size_t next)
             return next;
         }
     }
+}
+
+static size_t
+test_swiss_count_for_groups(size_t groups)
+{
+    return dshmap__growth_left_for_cap(
+        dshmap__capacity_from_groups(groups));
+}
+
+static size_t
+test_swiss_group_mask_for_count(size_t count)
+{
+    return dshmap__groups_for_count(count, 1) - 1;
 }
 
 static void
@@ -392,8 +430,8 @@ test_tombstone_preserves_probe_chain(void)
     dshmap map;
     dshmap_init(&map, hashed_entry_hash);
     dshmap_reserve(&map, 14);
-    if (!map.dense) {
-        assert(map.group_mask == 1);
+    if (!map.small) {
+        assert(map.group_mask == test_swiss_group_mask_for_count(14));
     }
 
     struct hashed_entry entries[9];
@@ -422,32 +460,36 @@ test_probe_wraparound(void)
 {
     dshmap map;
     dshmap_init(&map, hashed_entry_hash);
-    dshmap_reserve(&map, 28);
-    if (!map.dense) {
+    size_t reserve_count = test_swiss_count_for_groups(4);
+    size_t entry_count = DSHMAP__GROUP_WIDTH + 1;
+    dshmap_reserve(&map, reserve_count);
+    if (!map.small) {
         assert(map.group_mask == 3);
     }
 
-    struct hashed_entry entries[9];
-    for (size_t i = 0; i < 9; i++) {
+    struct hashed_entry entries[DSHMAP__GROUP_WIDTH + 1];
+    for (size_t i = 0; i < entry_count; i++) {
         dshmap_hash_t h1 = 3 + i * 4;
         entries[i].key = (int)i;
         entries[i].hash = (h1 << 7) | (20 + i);
         dshmap_insert(&map, &entries[i], entries[i].hash);
     }
-    assert(dshmap_size(&map) == 9);
+    assert(dshmap_size(&map) == entry_count);
 
-    for (size_t i = 0; i < 9; i++) {
+    for (size_t i = 0; i < entry_count; i++) {
         assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
     }
     assert(dshmap_find(&map, ((dshmap_hash_t)43 << 7) | 60) == NULL);
 
     dshmap_remove(&map, &entries[0], entries[0].hash);
     assert(dshmap_find(&map, entries[0].hash) == NULL);
-    assert(dshmap_find(&map, entries[8].hash) == &entries[8]);
+    assert(dshmap_find(&map, entries[entry_count - 1].hash) ==
+           &entries[entry_count - 1]);
 
-    dshmap_remove(&map, &entries[8], entries[8].hash);
-    assert(dshmap_find(&map, entries[8].hash) == NULL);
-    assert(dshmap_size(&map) == 7);
+    dshmap_remove(&map, &entries[entry_count - 1],
+                  entries[entry_count - 1].hash);
+    assert(dshmap_find(&map, entries[entry_count - 1].hash) == NULL);
+    assert(dshmap_size(&map) == entry_count - 2);
 
     dshmap_destroy(&map);
 }
@@ -457,44 +499,80 @@ test_reuse_deep_tombstone_before_grow(void)
 {
     dshmap map;
     dshmap_init(&map, hashed_entry_hash);
-    dshmap_reserve(&map, 28);
-    if (!map.dense) {
-        assert(map.group_mask == 3);
+    size_t count = test_swiss_count_for_groups(2);
+    if (count <= DSHMAP__GROUP_WIDTH) {
+        dshmap_destroy(&map);
+        return;
+    }
+    dshmap_reserve(&map, count);
+    if (!map.small) {
+        assert(map.group_mask == 1);
     }
 
-    struct hashed_entry entries[29];
-    for (size_t i = 0; i < 28; i++) {
+    struct hashed_entry entries[count + 1];
+    for (size_t i = 0; i < count; i++) {
         entries[i].key = (int)i;
         entries[i].hash = ((dshmap_hash_t)(i * 4) << 7) | (i + 1);
         dshmap_insert(&map, &entries[i], entries[i].hash);
     }
-    assert(dshmap_size(&map) == 28);
-    if (!map.dense) {
+    assert(dshmap_size(&map) == count);
+    if (!map.small) {
         assert(map.growth_left == 0);
     }
 
-    dshmap_remove(&map, &entries[10], entries[10].hash);
-    assert(dshmap_find(&map, entries[10].hash) == NULL);
-    if (!map.dense) {
+    size_t remove_idx = DSHMAP__GROUP_WIDTH / 2;
+    dshmap_remove(&map, &entries[remove_idx], entries[remove_idx].hash);
+    assert(dshmap_find(&map, entries[remove_idx].hash) == NULL);
+    if (!map.small) {
         assert(map.growth_left == 0);
     }
 
     size_t mask = map.group_mask;
-    entries[28].key = 28;
-    entries[28].hash = ((dshmap_hash_t)(100 * 4) << 7) | 90;
-    dshmap_insert(&map, &entries[28], entries[28].hash);
+    entries[count].key = (int)count;
+    entries[count].hash = ((dshmap_hash_t)(100 * 4) << 7) | 90;
+    dshmap_insert(&map, &entries[count], entries[count].hash);
 
     assert(map.group_mask == mask);
-    assert(dshmap_size(&map) == 28);
-    assert(dshmap_find(&map, entries[28].hash) == &entries[28]);
+    assert(dshmap_size(&map) == count);
+    assert(dshmap_find(&map, entries[count].hash) == &entries[count]);
 
-    for (size_t i = 0; i < 28; i++) {
-        if (i != 10) {
+    for (size_t i = 0; i < count; i++) {
+        if (i != remove_idx) {
             assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
         }
     }
 
     dshmap_destroy(&map);
+}
+
+static void
+test_swiss_single_group_upper_half(void)
+{
+#if DSHMAP_SMALL_THRESHOLD != 0 || DSHMAP__GROUP_WIDTH != 16
+    return;
+#else
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+
+    size_t count = DSHMAP__GROUP_WIDTH - 2;
+    dshmap_reserve(&map, count);
+    assert(!map.small);
+    assert(map.group_mask == 0);
+
+    struct hashed_entry entries[DSHMAP__GROUP_WIDTH - 2];
+    for (size_t i = 0; i < count; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (dshmap_hash_t)(i + 1);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+    }
+
+    assert(dshmap_size(&map) == count);
+    for (size_t i = 0; i < count; i++) {
+        assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
+    }
+
+    dshmap_destroy(&map);
+#endif
 }
 
 static void
@@ -615,9 +693,9 @@ test_find_key_skips_same_h2_noise(void)
 }
 
 static void
-test_dense_hash_storage_policy(void)
+test_small_hash_storage_policy(void)
 {
-    size_t threshold = DSHMAP_DENSE_THRESHOLD;
+    size_t threshold = DSHMAP_SMALL_THRESHOLD;
     if (threshold == 0) {
         return;
     }
@@ -633,31 +711,60 @@ test_dense_hash_storage_policy(void)
         dshmap_insert(&map, &entries[i], entries[i].hash);
     }
 
-#if DSHMAP_DENSE_STORE_HASHES
-    assert(map.hashes != NULL);
-#else
     assert(map.hashes == NULL);
-#endif
-    assert(map.dense);
+    assert(map.small);
+    dshmap__small_node *nodes = dshmap__small_nodes(&map);
+    for (size_t i = 0; i < n; i++) {
+        assert(nodes[i].hash == entries[i].hash);
+    }
     counted_hash_calls = 0;
 
     for (size_t i = 0; i < n; i++) {
         assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
     }
     assert(dshmap_find(&map, 999999) == NULL);
-#if DSHMAP_DENSE_STORE_HASHES
     assert(counted_hash_calls == 0);
-#else
-    assert(counted_hash_calls > 0);
-#endif
 
     dshmap_destroy(&map);
 }
 
 static void
-test_dense_remove_backshifts_cluster(void)
+test_small_mode_uses_pooled_chaining(void)
 {
-    size_t threshold = DSHMAP_DENSE_THRESHOLD;
+    size_t threshold = DSHMAP_SMALL_THRESHOLD;
+    if (threshold < 4) {
+        return;
+    }
+
+    dshmap map;
+    dshmap_init(&map, colliding_hash);
+
+    struct keyed_entry entries[4] = {
+        { .key = 1 },
+        { .key = 2 },
+        { .key = 3 },
+        { .key = 4 },
+    };
+
+    for (size_t i = 0; i < 4; i++) {
+        dshmap_insert(&map, &entries[i], 42);
+    }
+
+    assert(map.small);
+    assert(dshmap_size(&map) == 4);
+    for (size_t i = 0; i < 4; i++) {
+        assert(dshmap_find(&map, 42) != NULL);
+        dshmap_remove(&map, &entries[i], 42);
+        assert(dshmap_size(&map) == 3 - i);
+    }
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_small_remove_preserves_chain(void)
+{
+    size_t threshold = DSHMAP_SMALL_THRESHOLD;
     if (threshold < 8) {
         return;
     }
@@ -668,11 +775,11 @@ test_dense_remove_backshifts_cluster(void)
     struct hashed_entry entries[8];
     for (size_t i = 0; i < 8; i++) {
         entries[i].key = (int)i;
-        entries[i].hash = (dshmap_hash_t)(i * 8 + 1);
+        entries[i].hash = (dshmap_hash_t)(i * DSHMAP__GROUP_WIDTH + 1);
         dshmap_insert(&map, &entries[i], entries[i].hash);
     }
 
-    assert(map.dense);
+    assert(map.small);
 
     dshmap_remove(&map, &entries[0], entries[0].hash);
     assert(dshmap_find(&map, entries[0].hash) == NULL);
@@ -680,7 +787,10 @@ test_dense_remove_backshifts_cluster(void)
         assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
     }
 
-    struct hashed_entry extra = { .key = 99, .hash = (dshmap_hash_t)(99 * 8 + 1) };
+    struct hashed_entry extra = {
+        .key = 99,
+        .hash = (dshmap_hash_t)(99 * DSHMAP__GROUP_WIDTH + 1),
+    };
     dshmap_insert(&map, &extra, extra.hash);
     assert(dshmap_find(&map, extra.hash) == &extra);
     assert(dshmap_size(&map) == 8);
@@ -689,9 +799,45 @@ test_dense_remove_backshifts_cluster(void)
 }
 
 static void
-test_dense_promotes_to_swiss_at_threshold(void)
+test_small_mode_reuses_free_list_nodes(void)
 {
-    size_t threshold = DSHMAP_DENSE_THRESHOLD;
+    size_t threshold = DSHMAP_SMALL_THRESHOLD;
+    if (threshold < 8) {
+        return;
+    }
+
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+
+    struct hashed_entry entries[8];
+    for (size_t i = 0; i < 8; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (dshmap_hash_t)(i + 1);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+    }
+    assert(map.small);
+
+    dshmap_remove(&map, &entries[2], entries[2].hash);
+    dshmap_remove(&map, &entries[5], entries[5].hash);
+
+    struct hashed_entry extra1 = { .key = 99, .hash = 99 };
+    struct hashed_entry extra2 = { .key = 100, .hash = 100 };
+    dshmap_insert(&map, &extra1, extra1.hash);
+    dshmap_insert(&map, &extra2, extra2.hash);
+
+    dshmap__small_node *nodes = dshmap__small_nodes(&map);
+    assert(nodes[5].entry == &extra1);
+    assert(nodes[2].entry == &extra2);
+    assert(dshmap_find(&map, extra1.hash) == &extra1);
+    assert(dshmap_find(&map, extra2.hash) == &extra2);
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_small_promotes_to_swiss_at_threshold(void)
+{
+    size_t threshold = DSHMAP_SMALL_THRESHOLD;
     if (threshold == 0) {
         return;
     }
@@ -707,14 +853,14 @@ test_dense_promotes_to_swiss_at_threshold(void)
         entries[i].key = (int)i;
         entries[i].hash = (dshmap_hash_t)(i * 2654435761u + 1);
         dshmap_insert(&map, &entries[i], entries[i].hash);
-        assert(map.dense);
+        assert(map.small);
     }
 
     entries[threshold].key = (int)threshold;
     entries[threshold].hash = (dshmap_hash_t)(threshold * 2654435761u + 1);
     dshmap_insert(&map, &entries[threshold], entries[threshold].hash);
 
-    assert(!map.dense);
+    assert(!map.small);
 #if DSHMAP_SWISS_STORE_HASHES
     assert(map.hashes != NULL);
 #else
@@ -730,9 +876,9 @@ test_dense_promotes_to_swiss_at_threshold(void)
 }
 
 static void
-test_dense_to_swiss_post_promotion_operations(void)
+test_small_to_swiss_post_promotion_operations(void)
 {
-    size_t threshold = DSHMAP_DENSE_THRESHOLD;
+    size_t threshold = DSHMAP_SMALL_THRESHOLD;
     if (threshold < 4) {
         return;
     }
@@ -762,7 +908,7 @@ test_dense_to_swiss_post_promotion_operations(void)
 
     for (size_t i = 0; i < threshold; i++) {
         dshmap_insert(&map, &entries[i], entries[i].hash);
-        assert(map.dense);
+        assert(map.small);
     }
 
     size_t shared_count = 0;
@@ -784,7 +930,7 @@ test_dense_to_swiss_post_promotion_operations(void)
     assert(third == NULL);
 
     dshmap_insert(&map, &entries[threshold], entries[threshold].hash);
-    assert(!map.dense);
+    assert(!map.small);
     assert(dshmap_size(&map) == threshold + 1);
 
     shared_count = 0;
@@ -845,7 +991,7 @@ test_dense_to_swiss_post_promotion_operations(void)
                   entries[threshold + 1].hash);
     dshmap_insert(&map, &entries[threshold + 2],
                   entries[threshold + 2].hash);
-    assert(!map.dense);
+    assert(!map.small);
     assert(dshmap_size(&map) == 2);
     assert(dshmap_find(&map, entries[threshold + 1].hash) ==
            &entries[threshold + 1]);
@@ -858,9 +1004,9 @@ test_dense_to_swiss_post_promotion_operations(void)
 }
 
 static void
-test_reserve_above_dense_threshold_uses_swiss(void)
+test_reserve_above_small_threshold_uses_swiss(void)
 {
-    size_t threshold = DSHMAP_DENSE_THRESHOLD;
+    size_t threshold = DSHMAP_SMALL_THRESHOLD;
     if (threshold == 0) {
         return;
     }
@@ -870,7 +1016,7 @@ test_reserve_above_dense_threshold_uses_swiss(void)
 
     dshmap_reserve(&map, threshold + 1);
     assert(map.slots != NULL);
-    assert(!map.dense);
+    assert(!map.small);
 #if DSHMAP_SWISS_STORE_HASHES
     assert(map.hashes != NULL);
 #else
@@ -897,14 +1043,14 @@ test_swiss_hash_storage_policy(void)
     dshmap map;
     dshmap_init(&map, counted_entry_hash);
 
-    size_t reserve_n = (size_t)DSHMAP_DENSE_THRESHOLD + 1;
+    size_t reserve_n = (size_t)DSHMAP_SMALL_THRESHOLD + 1;
     if (reserve_n < 16) {
         reserve_n = 16;
     }
     dshmap_reserve(&map, reserve_n);
 
     assert(map.slots != NULL);
-    assert(!map.dense);
+    assert(!map.small);
 #if DSHMAP_SWISS_STORE_HASHES
     assert(map.hashes != NULL);
 #else
@@ -1098,9 +1244,9 @@ test_reserve_noop(void)
 }
 
 static void
-test_reserve_promotes_dense_table(void)
+test_reserve_promotes_small_table(void)
 {
-    size_t threshold = DSHMAP_DENSE_THRESHOLD;
+    size_t threshold = DSHMAP_SMALL_THRESHOLD;
     if (threshold == 0) {
         return;
     }
@@ -1110,10 +1256,10 @@ test_reserve_promotes_dense_table(void)
 
     struct hashed_entry entry = { .key = 1, .hash = 1 };
     dshmap_insert(&map, &entry, entry.hash);
-    assert(map.dense);
+    assert(map.small);
 
     dshmap_reserve(&map, threshold + 1);
-    assert(!map.dense);
+    assert(!map.small);
     assert(dshmap_size(&map) == 1);
     assert(dshmap_find(&map, entry.hash) == &entry);
 
@@ -1123,7 +1269,7 @@ test_reserve_promotes_dense_table(void)
 static void
 test_swiss_reserve_noop_and_growth(void)
 {
-    size_t reserve_n = (size_t)DSHMAP_DENSE_THRESHOLD + 1;
+    size_t reserve_n = (size_t)DSHMAP_SMALL_THRESHOLD + 1;
     if (reserve_n < 16) {
         reserve_n = 16;
     }
@@ -1132,7 +1278,7 @@ test_swiss_reserve_noop_and_growth(void)
     dshmap_init(&map, hashed_entry_hash);
 
     dshmap_reserve(&map, reserve_n);
-    assert(!map.dense);
+    assert(!map.small);
 
     size_t old_mask = map.group_mask;
     dshmap_reserve(&map, 1);
@@ -1308,9 +1454,9 @@ test_iterator_api(void)
 }
 
 static void
-test_safe_iteration_removes_dense_cluster(void)
+test_safe_iteration_removes_small_chain(void)
 {
-    if (DSHMAP_DENSE_THRESHOLD < 8) {
+    if (DSHMAP_SMALL_THRESHOLD < 8) {
         return;
     }
 
@@ -1320,10 +1466,10 @@ test_safe_iteration_removes_dense_cluster(void)
     struct hashed_entry entries[8];
     for (size_t i = 0; i < 8; i++) {
         entries[i].key = (int)i;
-        entries[i].hash = (dshmap_hash_t)(i * 16 + 1);
+        entries[i].hash = (dshmap_hash_t)(i * DSHMAP__GROUP_WIDTH + 1);
         dshmap_insert(&map, &entries[i], entries[i].hash);
     }
-    assert(map.dense);
+    assert(map.small);
 
     bool seen[8] = {0};
     size_t count = 0;
@@ -1352,12 +1498,12 @@ test_safe_iteration_removes_swiss_table(void)
     dshmap map;
     dshmap_init(&map, hashed_entry_hash);
 
-    size_t reserve_n = (size_t)DSHMAP_DENSE_THRESHOLD + 1;
+    size_t reserve_n = (size_t)DSHMAP_SMALL_THRESHOLD + 1;
     if (reserve_n < 32) {
         reserve_n = 32;
     }
     dshmap_reserve(&map, reserve_n);
-    assert(!map.dense);
+    assert(!map.small);
 
     struct hashed_entry entries[32];
     for (size_t i = 0; i < 32; i++) {
@@ -1520,6 +1666,10 @@ test_load_factor_boundary(void)
     dshmap map;
     dshmap_init(&map, dummy_hash);
 
+#if DSHMAP_SMALL_THRESHOLD != 0
+    dshmap_reserve(&map, DSHMAP_SMALL_THRESHOLD + 1);
+    assert(!map.small);
+#endif
     dshmap_insert(&map, (void *)1, dummy_hash((void *)1));
     size_t next = fill_until_growth_left_zero(&map, 2);
     size_t mask = map.group_mask;
@@ -1540,6 +1690,10 @@ test_remove_empty_slot_restores_growth(void)
     dshmap map;
     dshmap_init(&map, dummy_hash);
 
+#if DSHMAP_SMALL_THRESHOLD != 0
+    dshmap_reserve(&map, DSHMAP_SMALL_THRESHOLD + 1);
+    assert(!map.small);
+#endif
     dshmap_insert(&map, (void *)1, dummy_hash((void *)1));
     size_t next = fill_until_growth_left_zero(&map, 2);
     size_t mask = map.group_mask;
@@ -1564,35 +1718,42 @@ test_reuse_tombstone_at_boundary(void)
     dshmap map;
     dshmap_init(&map, dummy_hash);
 
-    dshmap_reserve(&map, 14);
-    if (!map.dense) {
+    size_t count = test_swiss_count_for_groups(2);
+    if (count <= DSHMAP__GROUP_WIDTH) {
+        dshmap_destroy(&map);
+        return;
+    }
+    size_t second_group_count = count - DSHMAP__GROUP_WIDTH;
+    dshmap_reserve(&map, count);
+    if (!map.small) {
         assert(map.group_mask == 1);
     }
 
-    for (size_t i = 1; i <= 8; i++) {
+    for (size_t i = 1; i <= DSHMAP__GROUP_WIDTH; i++) {
         dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
-    for (size_t i = 129; i <= 134; i++) {
+    for (size_t i = 129; i < 129 + second_group_count; i++) {
         dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }
-    assert(dshmap_size(&map) == 14);
-    if (!map.dense) {
+    assert(dshmap_size(&map) == count);
+    if (!map.small) {
         assert(map.growth_left == 0);
     }
 
     dshmap_remove(&map, (void *)1, dummy_hash((void *)1));
-    if (!map.dense) {
+    if (!map.small) {
         assert(map.group_mask == 1);
         assert(map.growth_left == 0);
     }
 
-    dshmap_insert(&map, (void *)9, dummy_hash((void *)9));
-    if (!map.dense) {
+    void *replacement = (void *)(DSHMAP__GROUP_WIDTH + 1);
+    dshmap_insert(&map, replacement, dummy_hash(replacement));
+    if (!map.small) {
         assert(map.group_mask == 1);
         assert(map.growth_left == 0);
     }
-    assert(dshmap_size(&map) == 14);
-    assert(dshmap_find(&map, dummy_hash((void *)9)) == (void *)9);
+    assert(dshmap_size(&map) == count);
+    assert(dshmap_find(&map, dummy_hash(replacement)) == replacement);
 
     dshmap_destroy(&map);
 }
@@ -1699,10 +1860,10 @@ test_for_each_with_hash(void)
     assert(macro_hash_calls == 1);
     assert(macro_map_calls == 1);
 
-#if DSHMAP_DENSE_THRESHOLD != 0
-    dshmap_reserve(&map, DSHMAP_DENSE_THRESHOLD + 1);
+#if DSHMAP_SMALL_THRESHOLD != 0
+    dshmap_reserve(&map, DSHMAP_SMALL_THRESHOLD + 1);
 #endif
-    assert(!map.dense);
+    assert(!map.small);
 
     count = 0;
     found_a = found_b = found_c = false;
@@ -1839,15 +2000,18 @@ main(void)
     RUN_TEST(test_tombstone_preserves_probe_chain);
     RUN_TEST(test_probe_wraparound);
     RUN_TEST(test_reuse_deep_tombstone_before_grow);
+    RUN_TEST(test_swiss_single_group_upper_half);
     RUN_TEST(test_find_key_resolves_hash_collision);
     RUN_TEST(test_find_key_next);
     RUN_TEST(test_find_key_does_not_rehash_candidates);
     RUN_TEST(test_find_key_skips_same_h2_noise);
-    RUN_TEST(test_dense_hash_storage_policy);
-    RUN_TEST(test_dense_remove_backshifts_cluster);
-    RUN_TEST(test_dense_promotes_to_swiss_at_threshold);
-    RUN_TEST(test_dense_to_swiss_post_promotion_operations);
-    RUN_TEST(test_reserve_above_dense_threshold_uses_swiss);
+    RUN_TEST(test_small_hash_storage_policy);
+    RUN_TEST(test_small_mode_uses_pooled_chaining);
+    RUN_TEST(test_small_remove_preserves_chain);
+    RUN_TEST(test_small_mode_reuses_free_list_nodes);
+    RUN_TEST(test_small_promotes_to_swiss_at_threshold);
+    RUN_TEST(test_small_to_swiss_post_promotion_operations);
+    RUN_TEST(test_reserve_above_small_threshold_uses_swiss);
     RUN_TEST(test_swiss_hash_storage_policy);
     RUN_TEST(test_remove);
     RUN_TEST(test_clear);
@@ -1855,7 +2019,7 @@ main(void)
     RUN_TEST(test_reserve);
     RUN_TEST(test_reserve_zero_noop);
     RUN_TEST(test_reserve_noop);
-    RUN_TEST(test_reserve_promotes_dense_table);
+    RUN_TEST(test_reserve_promotes_small_table);
     RUN_TEST(test_swiss_reserve_noop_and_growth);
     RUN_TEST(test_reserve_after_tombstone_churn);
     RUN_TEST(test_growth);
@@ -1863,7 +2027,7 @@ main(void)
     RUN_TEST(test_iteration);
     RUN_TEST(test_iteration_empty);
     RUN_TEST(test_iterator_api);
-    RUN_TEST(test_safe_iteration_removes_dense_cluster);
+    RUN_TEST(test_safe_iteration_removes_small_chain);
     RUN_TEST(test_safe_iteration_removes_swiss_table);
     RUN_TEST(test_find_empty);
     RUN_TEST(test_remove_empty);

@@ -1,10 +1,12 @@
 #ifndef BENCH_IMPL_H
 #define BENCH_IMPL_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 typedef size_t bench_hash_t;
 typedef bench_hash_t (*bench_hash_fn)(const void *entry);
+typedef bool (*bench_key_eq_fn)(const void *entry, const void *key);
 typedef void (*bench_iter_cb)(void *entry, void *arg);
 
 typedef struct {
@@ -14,6 +16,8 @@ typedef struct {
     void (*destroy)(void *ctx);
     void (*insert)(void *ctx, void *entry, bench_hash_t hash);
     void *(*find)(const void *ctx, bench_hash_t hash);
+    void *(*find_key)(const void *ctx, bench_hash_t hash, const void *key,
+                      bench_key_eq_fn eq_fn);
     void (*remove)(void *ctx, const void *entry, bench_hash_t hash);
     void (*reserve)(void *ctx, size_t count);
     size_t (*size)(const void *ctx);

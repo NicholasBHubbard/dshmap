@@ -1,13 +1,14 @@
 # dshmap
 
-dshmap is a header only C99 swiss-style hash map with a dense small-table fast path.
+dshmap is a header only C99 Swiss-style hash map with a pooled small-table fast path.
 
 ## Features
 
-- **Hybrid layout**: small tables use a dense open-addressed layout, then promote to the Swiss-table layout after `DSHMAP_DENSE_THRESHOLD` entries
-- **Scale-oriented**: flat layouts reduce pointer chasing and cache misses; the largest Swiss-table wins show up on large tables, especially misses, removes, iteration, and memory use ([see benchmarks](#benchmarks))
-- **Cache-friendly**: contiguous control bytes and slots improve locality compared with pointer-heavy tables
-- **Configurable hash storage**: store full hashes per slot when hash functions are expensive, or omit them to reduce memory use
+- **Hybrid layout**: small tables use pooled separate chaining, then promote to the Swiss-table layout after `DSHMAP_SMALL_THRESHOLD` entries
+- **Scale-oriented**: flat layouts reduce pointer chasing and cache misses; the largest Swiss-table wins show up on large tables, especially misses, iteration, and memory use ([see benchmarks](#benchmarks))
+- **Cache-friendly**: small mode keeps bucket heads and nodes in one allocation; Swiss mode uses contiguous control bytes and slots
+- **SIMD/SWAR control matching**: uses x86 SIMD on AVX2 targets and Clang SSE2 targets, NEON on ARM, and SWAR otherwise
+- **Configurable Swiss hash storage**: store full hashes per Swiss slot when hash functions are expensive, or omit them to reduce memory use
 - **Public iterators**: cursor-based iteration plus safe remove-current iteration
 - **Header-only**: single file, no build system integration, no dependencies beyond the C standard library
 - **Generic**: stores caller-owned non-`NULL` `void *` entries; each entry pointer may be present at most once
@@ -78,25 +79,51 @@ Full documentation is in `dshmap.h`.
 `NULL` entries are not supported. `dshmap` uses `NULL` as the lookup miss result
 and as an iteration sentinel.
 
-Define `DSHMAP_DENSE_THRESHOLD` before including `dshmap.h` to tune the hybrid
-cutover. The default is `2048`. Define it as `0` to disable dense mode and use
+Define `DSHMAP_SMALL_THRESHOLD` before including `dshmap.h` to tune the hybrid
+cutover. The default is `2048`. Define it as `0` to disable small mode and use
 the Swiss layout from the first insertion.
 
-Hash storage is independently configurable for dense and Swiss layouts. Define
-these macros before including `dshmap.h`:
+Small mode always stores the full hash in each pooled node. Swiss hash storage
+is configurable. Define this macro before including `dshmap.h`:
 
 ```c
-#define DSHMAP_DENSE_STORE_HASHES 1
 #define DSHMAP_SWISS_STORE_HASHES 0
 #include "dshmap.h"
 ```
 
-Those are the defaults: dense mode stores full hashes because small tables are
-sensitive to repeated hash recomputation, while Swiss mode omits them to keep
-large tables compact. Disabling hash storage saves one `dshmap_hash_t` per slot
-but recomputes hashes during some lookups, removals, and resizes. Enabling hash
-storage can help when hash functions are expensive or collision-heavy lookups
-are common.
+That is the default: small mode stores full hashes because it needs exact hash
+checks inside each chain, while Swiss mode omits them to keep large tables
+compact. Enabling Swiss hash storage costs one `dshmap_hash_t` per Swiss slot
+but avoids recomputing hashes during some lookups, removals, and resizes. It
+can help when hash functions are expensive or collision-heavy lookups are
+common.
+
+`DSHMAP_DENSE_THRESHOLD` is still accepted as an old name for
+`DSHMAP_SMALL_THRESHOLD`.
+
+Swiss control-byte matching uses the fastest simple backend found in local
+benchmarks:
+
+- x86 SIMD on AVX2 compiler targets
+- x86 SIMD on Clang SSE2 targets
+- NEON on ARM targets
+- SWAR otherwise
+
+GCC x86 builds without AVX2 use SWAR by default because the generic SSE2 path
+was slower for successful key lookups in profiling. Compile GCC with `-mavx2`
+or `-march=native` if you want the x86 SIMD backend where supported. To force
+the fallback, define `DSHMAP_DISABLE_SIMD` before including `dshmap.h`:
+
+```c
+#define DSHMAP_DISABLE_SIMD 1
+#include "dshmap.h"
+```
+
+SIMD backends use 16-slot Swiss groups. The SWAR fallback uses 8-slot groups
+because that is faster for scalar control matching. This is normally an
+internal detail, but it affects very low custom load factors: configs below
+`1/8` can compile on SIMD targets and fail on the SWAR fallback. Use a load
+factor of at least `1/8` if the same config must compile everywhere.
 
 ## Iteration
 
@@ -158,7 +185,7 @@ Run with AddressSanitizer and UndefinedBehaviorSanitizer:
 make test-asan
 ```
 
-Run the comparative benchmark (dshmap vs chained hash map):
+Run the comparative benchmark (dshmap vs every registered implementation):
 
 ```
 make bench
@@ -173,13 +200,12 @@ make bench BENCH_ARGS="--compare --geometric 1:65536:2 --ops find_hit,find_miss,
 
 ## Performance Profile
 
-`dshmap` is designed for large, cache-sensitive tables. Its flat layout tends
-to pay off once pointer chasing and cache misses dominate.
+`dshmap` is designed to use a simple pooled chained table at small sizes, then
+switch to Swiss layout once flat probing starts to pay off.
 
-Dense mode reduces small-table overhead, especially for inserts, removes, and
-mixed workloads. It still is not guaranteed to beat simpler hash maps: direct
-hit lookups and iteration can remain faster in a simple chained table or
-linear structure at small sizes.
+Small mode avoids paying Swiss-table probing overhead before the table is large
+enough to benefit from it. The Swiss layout still does the heavy lifting for
+larger tables, especially misses and iteration.
 
 Benchmark with your workload if small-table latency matters.
 
@@ -193,77 +219,142 @@ when available via `perf_event_open`.
 The benchmark can also scan arbitrary table sizes. Use `--linear A:B[:STEP]`
 for every size in a range, `--geometric A:B[:MUL]` for powers, `--sizes`
 for explicit lists, `--keys ptr|string|expensive` to switch key/hash
-workloads, `--ops` to limit operations, `--compare` for a compact
-dshmap/chained crossover table, or `--csv` for machine-readable output.
+workloads, `--impls dshmap,chained,...` to choose implementations, `--ops` to
+limit operations, `--samples N` to choose the number of timed samples,
+`--compare` for compact dshmap-vs-each-implementation rows, or `--csv` for
+machine-readable output.
 The `ptr` workload is the original integer-as-pointer benchmark; `string`
 uses fixed string entries; `expensive` uses the same entries with a
 deliberately expensive hash function.
 
-The benchmark compares dshmap against a chained hash map (separate chaining
-with linked lists). Adding your own implementation
-is straightforward: write an `impl_foo.h` adapter with the `bench_impl`
-vtable and add it to the `impls[]` array in `bench/bench.c`.
+The benchmark compares dshmap against every implementation registered in
+`impls[]` in `bench/bench.c`. The current set includes a chained hash map,
+a packed linear table, and a flat open-addressed table. The chained baseline
+uses a reusable node pool after `reserve`, so reserved workloads do not charge
+it a malloc/free per insert or remove. Adding your own implementation is
+straightforward: write an `impl_foo.h` adapter with the `bench_impl` vtable
+and add it to the `impls[]` array.
 
 The table below uses the `ptr` workload, with hardware counters disabled.
-Values are median wall-clock timings from 7 runs. Ratio is
-`dshmap / chained`, so lower is better. Layout is the dshmap layout used for
-that size with the default `DSHMAP_DENSE_THRESHOLD=2048`.
+Values are median wall-clock timings from 7 samples. Ratio is
+`dshmap / candidate`, so lower is better. Layout is the dshmap layout used for
+that size with the default `DSHMAP_SMALL_THRESHOLD=2048`. These numbers were
+collected on x86_64 with the default GCC backend selection.
 
 ```
-make bench BENCH_ARGS="--compare --sizes 64,2048,4096,65536,1048576 --keys ptr --ops insert_seq,find_hit,find_miss,remove,iterate,mixed --min-ops 500000 --no-perf"
+make bench BENCH_ARGS="--compare --sizes 64,2048,4096 --keys ptr --ops insert_seq,find_hit,find_miss,remove,iterate,mixed --min-ops 500000 --no-perf"
 ```
 
-`mixed` starts from a half-full table and runs a randomized workload of about
-70% find, 20% insert, and 10% remove.
+`find_hit` and `find_miss` perform keyed lookup, not hash-only lookup.
+`insert_seq` reserves the target size before timing. `mixed` starts from a
+half-full table, reserves the expected workload size, and runs a randomized
+live-key workload of about 70% find, 20% insert, and 10% remove. It also does
+periodic full-table iteration. Iteration work is counted as one operation per
+entry visited.
+
+| Size | Layout | Operation | Candidate | dshmap (ns/op) | candidate (ns/op) | Ratio | Winner |
+|---:|---|---|---|---:|---:|---:|---|
+| 64 | small | `insert_seq` | chained | 3.3 | 2.3 | 1.417 | chained |
+| 64 | small | `insert_seq` | packed | 3.3 | 1.5 | 2.241 | packed |
+| 64 | small | `insert_seq` | flat | 3.3 | 2.2 | 1.481 | flat |
+| 64 | small | `find_hit` | chained | 2.9 | 2.7 | 1.080 | chained |
+| 64 | small | `find_hit` | packed | 2.9 | 16.3 | 0.178 | dshmap |
+| 64 | small | `find_hit` | flat | 2.9 | 3.0 | 0.965 | dshmap |
+| 64 | small | `find_miss` | chained | 2.6 | 2.3 | 1.123 | chained |
+| 64 | small | `find_miss` | packed | 2.6 | 35.2 | 0.075 | dshmap |
+| 64 | small | `find_miss` | flat | 2.6 | 3.1 | 0.856 | dshmap |
+| 64 | small | `remove` | chained | 3.3 | 1.9 | 1.731 | chained |
+| 64 | small | `remove` | packed | 3.3 | 4.9 | 0.668 | dshmap |
+| 64 | small | `remove` | flat | 3.3 | 3.3 | 0.996 | dshmap |
+| 64 | small | `iterate` | chained | 2.0 | 1.7 | 1.180 | chained |
+| 64 | small | `iterate` | packed | 2.0 | 1.0 | 1.953 | packed |
+| 64 | small | `iterate` | flat | 2.0 | 2.2 | 0.884 | dshmap |
+| 64 | small | `mixed` | chained | 3.3 | 2.8 | 1.161 | chained |
+| 64 | small | `mixed` | packed | 3.3 | 5.2 | 0.625 | dshmap |
+| 64 | small | `mixed` | flat | 3.3 | 3.5 | 0.942 | dshmap |
+| 2048 | small | `insert_seq` | chained | 2.9 | 2.6 | 1.131 | chained |
+| 2048 | small | `insert_seq` | packed | 2.9 | 1.6 | 1.828 | packed |
+| 2048 | small | `insert_seq` | flat | 2.9 | 2.2 | 1.318 | flat |
+| 2048 | small | `find_hit` | chained | 3.5 | 3.2 | 1.104 | chained |
+| 2048 | small | `find_hit` | packed | 3.5 | 460.4 | 0.008 | dshmap |
+| 2048 | small | `find_hit` | flat | 3.5 | 3.3 | 1.057 | flat |
+| 2048 | small | `find_miss` | chained | 2.6 | 2.4 | 1.059 | chained |
+| 2048 | small | `find_miss` | packed | 2.6 | 908.1 | 0.003 | dshmap |
+| 2048 | small | `find_miss` | flat | 2.6 | 2.8 | 0.902 | dshmap |
+| 2048 | small | `remove` | chained | 4.0 | 2.4 | 1.675 | chained |
+| 2048 | small | `remove` | packed | 4.0 | 163.8 | 0.025 | dshmap |
+| 2048 | small | `remove` | flat | 4.0 | 3.6 | 1.112 | flat |
+| 2048 | small | `iterate` | chained | 1.8 | 1.5 | 1.154 | chained |
+| 2048 | small | `iterate` | packed | 1.8 | 0.9 | 2.055 | packed |
+| 2048 | small | `iterate` | flat | 1.8 | 2.1 | 0.841 | dshmap |
+| 2048 | small | `mixed` | chained | 2.3 | 4.3 | 0.522 | dshmap |
+| 2048 | small | `mixed` | packed | 2.3 | 38.7 | 0.059 | dshmap |
+| 2048 | small | `mixed` | flat | 2.3 | 7.0 | 0.322 | dshmap |
+| 4096 | Swiss | `insert_seq` | chained | 3.8 | 2.7 | 1.405 | chained |
+| 4096 | Swiss | `insert_seq` | packed | 3.8 | 1.6 | 2.354 | packed |
+| 4096 | Swiss | `insert_seq` | flat | 3.8 | 2.5 | 1.535 | flat |
+| 4096 | Swiss | `find_hit` | chained | 4.4 | 4.9 | 0.897 | dshmap |
+| 4096 | Swiss | `find_hit` | packed | 4.4 | 932.7 | 0.005 | dshmap |
+| 4096 | Swiss | `find_hit` | flat | 4.4 | 4.7 | 0.923 | dshmap |
+| 4096 | Swiss | `find_miss` | chained | 4.0 | 2.6 | 1.536 | chained |
+| 4096 | Swiss | `find_miss` | packed | 4.0 | 1898.5 | 0.002 | dshmap |
+| 4096 | Swiss | `find_miss` | flat | 4.0 | 3.1 | 1.303 | flat |
+| 4096 | Swiss | `remove` | chained | 4.7 | 3.0 | 1.582 | chained |
+| 4096 | Swiss | `remove` | packed | 4.7 | 326.6 | 0.014 | dshmap |
+| 4096 | Swiss | `remove` | flat | 4.7 | 6.0 | 0.784 | dshmap |
+| 4096 | Swiss | `iterate` | chained | 2.1 | 1.6 | 1.293 | chained |
+| 4096 | Swiss | `iterate` | packed | 2.1 | 0.9 | 2.361 | packed |
+| 4096 | Swiss | `iterate` | flat | 2.1 | 4.0 | 0.532 | dshmap |
+| 4096 | Swiss | `mixed` | chained | 3.6 | 6.6 | 0.551 | dshmap |
+| 4096 | Swiss | `mixed` | packed | 3.6 | 75.6 | 0.048 | dshmap |
+| 4096 | Swiss | `mixed` | flat | 3.6 | 8.9 | 0.410 | dshmap |
+
+For large tables, the packed linear table is not useful for lookup-heavy
+workloads. The table below compares dshmap with the chained baseline only:
+
+```
+make bench BENCH_ARGS="--compare --impls dshmap,chained --sizes 65536,1048576,10000000 --keys ptr --ops insert_seq,find_hit,find_miss,remove,iterate,mixed --min-ops 500000 --no-perf"
+```
 
 | Size | Layout | Operation | dshmap (ns/op) | chained (ns/op) | Ratio | Winner |
 |---:|---|---|---:|---:|---:|---|
-| 64 | dense | `insert_seq` | 7.9 | 8.4 | 0.94 | dshmap |
-| 64 | dense | `find_hit` | 2.8 | 2.1 | 1.33 | chained |
-| 64 | dense | `find_miss` | 2.7 | 2.6 | 1.01 | chained |
-| 64 | dense | `remove` | 4.9 | 6.9 | 0.72 | dshmap |
-| 64 | dense | `iterate` | 1.6 | 1.6 | 1.04 | chained |
-| 64 | dense | `mixed` | 3.1 | 3.1 | 1.02 | chained |
-| 2048 | dense | `insert_seq` | 8.7 | 19.4 | 0.45 | dshmap |
-| 2048 | dense | `find_hit` | 3.0 | 2.1 | 1.45 | chained |
-| 2048 | dense | `find_miss` | 2.6 | 2.9 | 0.91 | dshmap |
-| 2048 | dense | `remove` | 4.7 | 7.7 | 0.62 | dshmap |
-| 2048 | dense | `iterate` | 1.6 | 1.7 | 0.96 | dshmap |
-| 2048 | dense | `mixed` | 3.3 | 3.8 | 0.86 | dshmap |
-| 4096 | Swiss | `insert_seq` | 14.9 | 21.2 | 0.70 | dshmap |
-| 4096 | Swiss | `find_hit` | 3.8 | 6.2 | 0.62 | dshmap |
-| 4096 | Swiss | `find_miss` | 3.5 | 7.8 | 0.45 | dshmap |
-| 4096 | Swiss | `remove` | 4.4 | 10.4 | 0.42 | dshmap |
-| 4096 | Swiss | `iterate` | 2.0 | 2.6 | 0.77 | dshmap |
-| 4096 | Swiss | `mixed` | 4.6 | 7.3 | 0.62 | dshmap |
-| 65536 | Swiss | `insert_seq` | 18.0 | 16.1 | 1.12 | chained |
-| 65536 | Swiss | `find_hit` | 4.5 | 13.5 | 0.33 | dshmap |
-| 65536 | Swiss | `find_miss` | 4.1 | 15.9 | 0.26 | dshmap |
-| 65536 | Swiss | `remove` | 5.7 | 17.1 | 0.33 | dshmap |
-| 65536 | Swiss | `iterate` | 2.9 | 7.1 | 0.40 | dshmap |
-| 65536 | Swiss | `mixed` | 7.6 | 15.7 | 0.49 | dshmap |
-| 1048576 | Swiss | `insert_seq` | 30.2 | 41.6 | 0.73 | dshmap |
-| 1048576 | Swiss | `find_hit` | 24.3 | 40.0 | 0.61 | dshmap |
-| 1048576 | Swiss | `find_miss` | 7.2 | 46.7 | 0.15 | dshmap |
-| 1048576 | Swiss | `remove` | 27.0 | 92.0 | 0.29 | dshmap |
-| 1048576 | Swiss | `iterate` | 3.2 | 19.7 | 0.16 | dshmap |
-| 1048576 | Swiss | `mixed` | 38.4 | 57.5 | 0.67 | dshmap |
+| 65536 | Swiss | `insert_seq` | 6.3 | 3.0 | 2.11 | chained |
+| 65536 | Swiss | `find_hit` | 5.2 | 10.6 | 0.49 | dshmap |
+| 65536 | Swiss | `find_miss` | 4.3 | 11.1 | 0.39 | dshmap |
+| 65536 | Swiss | `remove` | 5.7 | 6.5 | 0.88 | dshmap |
+| 65536 | Swiss | `iterate` | 3.1 | 7.5 | 0.42 | dshmap |
+| 65536 | Swiss | `mixed` | 4.9 | 9.3 | 0.53 | dshmap |
+| 1048576 | Swiss | `insert_seq` | 14.9 | 10.9 | 1.37 | chained |
+| 1048576 | Swiss | `find_hit` | 27.7 | 41.7 | 0.67 | dshmap |
+| 1048576 | Swiss | `find_miss` | 8.1 | 33.8 | 0.24 | dshmap |
+| 1048576 | Swiss | `remove` | 25.3 | 32.1 | 0.79 | dshmap |
+| 1048576 | Swiss | `iterate` | 3.5 | 16.7 | 0.21 | dshmap |
+| 1048576 | Swiss | `mixed` | 13.6 | 23.9 | 0.57 | dshmap |
+| 10000000 | Swiss | `insert_seq` | 31.3 | 28.0 | 1.12 | chained |
+| 10000000 | Swiss | `find_hit` | 56.0 | 50.5 | 1.11 | chained |
+| 10000000 | Swiss | `find_miss` | 22.9 | 34.8 | 0.66 | dshmap |
+| 10000000 | Swiss | `remove` | 50.4 | 42.7 | 1.18 | chained |
+| 10000000 | Swiss | `iterate` | 3.1 | 21.4 | 0.14 | dshmap |
+| 10000000 | Swiss | `mixed` | 19.5 | 33.5 | 0.58 | dshmap |
 
 ### Memory
 
-| Size | dshmap bytes/entry | chained bytes/entry |
-|---:|---:|---:|
-| 64 | 34.0 | 32.0 |
-| 2048 | 34.0 | 32.0 |
-| 4096 | 18.0 | 32.0 |
-| 65536 | 18.0 | 32.0 |
-| 1048576 | 18.0 | 32.0 |
+Values are bytes per entry.
+
+| Size | dshmap | chained | packed | flat |
+|---:|---:|---:|---:|---:|
+| 64 | 32.0 | 32.0 | 16.0 | 32.0 |
+| 2048 | 32.0 | 32.0 | 16.0 | 32.0 |
+| 4096 | 18.0 | 32.0 | 16.0 | 32.0 |
+| 65536 | 18.0 | 32.0 | - | - |
+| 1048576 | 18.0 | 32.0 | - | - |
+| 10000000 | 15.1 | 37.4 | - | - |
 
 ## Requirements
 
 - C99 compiler (GCC or Clang)
-- Little-endian 64-bit platform (SWAR operations assume 64-bit `uint64_t`
-  and little-endian control-byte decoding)
+- Little-endian platform
+- `uint64_t` support for the SWAR fallback
 
 The benchmark (`make bench`) uses Linux `perf_event_open` for hardware
 counters but falls back to wall-clock timing on other platforms.
