@@ -191,6 +191,8 @@ enum {
 static size_t counted_hash_calls;
 static size_t macro_hash_calls;
 static size_t macro_map_calls;
+static size_t macro_shard_calls;
+static size_t macro_shard_count_calls;
 static uint64_t model_rng_state;
 
 static bool
@@ -228,6 +230,20 @@ macro_map_arg(dshmap *map)
 {
     macro_map_calls++;
     return map;
+}
+
+static size_t
+macro_shard_arg(size_t shard)
+{
+    macro_shard_calls++;
+    return shard;
+}
+
+static size_t
+macro_shard_count_arg(size_t shard_count)
+{
+    macro_shard_count_calls++;
+    return shard_count;
 }
 
 static bool
@@ -1715,6 +1731,200 @@ test_iterator_api(void)
     dshmap_destroy(&map);
 }
 
+enum {
+    SHARD_TEST_CAP = 96,
+};
+
+static size_t
+shard_entry_index(const struct hashed_entry *entries, size_t n,
+                  const void *entry)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (&entries[i] == entry) {
+            return i;
+        }
+    }
+    return n;
+}
+
+static void
+shard_check_entry(const struct hashed_entry *entries, const bool *live,
+                  size_t n, void *entry, bool *seen, size_t *count)
+{
+    size_t idx = shard_entry_index(entries, n, entry);
+    assert(idx < n);
+    assert(live[idx]);
+    assert(!seen[idx]);
+    seen[idx] = true;
+    (*count)++;
+}
+
+static void
+check_shards_cover_entries(const dshmap *map, struct hashed_entry *entries,
+                           const bool *live, size_t n, size_t shard_count,
+                           bool use_macro)
+{
+    bool seen[SHARD_TEST_CAP] = {0};
+    size_t count = 0;
+    size_t live_count = 0;
+
+    assert(n <= SHARD_TEST_CAP);
+    for (size_t i = 0; i < n; i++) {
+        if (live[i]) {
+            live_count++;
+        }
+    }
+
+    for (size_t shard = 0; shard < shard_count; shard++) {
+        if (use_macro) {
+            DSHMAP_FOR_EACH_SHARD(entry, map, shard, shard_count) {
+                shard_check_entry(entries, live, n, entry, seen, &count);
+            }
+        } else {
+            dshmap_iter iter;
+            dshmap_iter_shard_init(&iter, map, shard, shard_count);
+            for (void *entry = dshmap_iter_shard_next(map, &iter);
+                 entry;
+                 entry = dshmap_iter_shard_next(map, &iter)) {
+                shard_check_entry(entries, live, n, entry, seen, &count);
+            }
+            assert(dshmap_iter_shard_next(map, &iter) == NULL);
+        }
+    }
+
+    assert(count == live_count);
+    for (size_t i = 0; i < n; i++) {
+        assert(seen[i] == live[i]);
+    }
+}
+
+static void
+test_shard_iteration_empty(void)
+{
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+
+    for (size_t shard = 0; shard < 7; shard++) {
+        dshmap_iter iter;
+        dshmap_iter_shard_init(&iter, &map, shard, 7);
+        assert(dshmap_iter_shard_next(&map, &iter) == NULL);
+    }
+
+    size_t count = 0;
+    DSHMAP_FOR_EACH_SHARD(entry, &map, 3, 7) {
+        (void)entry;
+        count++;
+    }
+    assert(count == 0);
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_shard_iteration_small_table(void)
+{
+    if (DSHMAP_SMALL_THRESHOLD < 12) {
+        return;
+    }
+
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+
+    struct hashed_entry entries[12];
+    bool live[12] = {0};
+    for (size_t i = 0; i < 10; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (dshmap_hash_t)((i % 3) * 16 + 1);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+        live[i] = true;
+    }
+
+    dshmap_remove(&map, &entries[2], entries[2].hash);
+    dshmap_remove(&map, &entries[7], entries[7].hash);
+    live[2] = false;
+    live[7] = false;
+
+    for (size_t i = 10; i < 12; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (dshmap_hash_t)((i % 3) * 16 + 1);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+        live[i] = true;
+    }
+    assert(map.small);
+
+    check_shards_cover_entries(&map, entries, live, 12, 1, false);
+    check_shards_cover_entries(&map, entries, live, 12, 2, false);
+    check_shards_cover_entries(&map, entries, live, 12, 3, true);
+    check_shards_cover_entries(&map, entries, live, 12, 32, true);
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_shard_iteration_swiss_table(void)
+{
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+    test_force_swiss(&map, 80);
+
+    struct hashed_entry entries[80];
+    bool live[80] = {0};
+    for (size_t i = 0; i < 80; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = ((dshmap_hash_t)(i % 11) << 7) | (i & 0x7f);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+        live[i] = true;
+    }
+
+    for (size_t i = 0; i < 80; i += 7) {
+        dshmap_remove(&map, &entries[i], entries[i].hash);
+        live[i] = false;
+    }
+    assert(!map.small);
+
+    check_shards_cover_entries(&map, entries, live, 80, 1, false);
+    check_shards_cover_entries(&map, entries, live, 80, 2, false);
+    check_shards_cover_entries(&map, entries, live, 80, 5, true);
+    check_shards_cover_entries(&map, entries, live, 80,
+                               map.group_mask + 3, true);
+
+    dshmap_iter iter;
+    dshmap_iter_shard_init(&iter, &map, map.group_mask + 1,
+                           map.group_mask + 3);
+    assert(dshmap_iter_shard_next(&map, &iter) == NULL);
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_for_each_shard_evaluates_args_once(void)
+{
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+
+    for (size_t i = 1; i <= 4; i++) {
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
+    }
+
+    macro_map_calls = 0;
+    macro_shard_calls = 0;
+    macro_shard_count_calls = 0;
+    size_t count = 0;
+    DSHMAP_FOR_EACH_SHARD(entry, macro_map_arg(&map),
+                          macro_shard_arg(0),
+                          macro_shard_count_arg(1)) {
+        (void)entry;
+        count++;
+    }
+
+    assert(count == 4);
+    assert(macro_map_calls == 1);
+    assert(macro_shard_calls == 1);
+    assert(macro_shard_count_calls == 1);
+
+    dshmap_destroy(&map);
+}
+
 static void
 test_hash_iterator_api(void)
 {
@@ -2404,6 +2614,10 @@ main(void)
     RUN_TEST(test_iteration);
     RUN_TEST(test_iteration_empty);
     RUN_TEST(test_iterator_api);
+    RUN_TEST(test_shard_iteration_empty);
+    RUN_TEST(test_shard_iteration_small_table);
+    RUN_TEST(test_shard_iteration_swiss_table);
+    RUN_TEST(test_for_each_shard_evaluates_args_once);
     RUN_TEST(test_hash_iterator_api);
     RUN_TEST(test_swiss_iter_next_after);
     RUN_TEST(test_safe_iteration_removes_small_chain);

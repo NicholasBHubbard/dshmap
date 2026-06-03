@@ -76,10 +76,13 @@ Full documentation is in `dshmap.h`.
 | `dshmap_iter_next` | Return the next entry from an iterator |
 | `dshmap_iter_hash_init` | Initialize an iterator for one full hash |
 | `dshmap_iter_hash_next` | Return the next entry from a hash iterator |
+| `dshmap_iter_shard_init` | Initialize a read-only shard iterator |
+| `dshmap_iter_shard_next` | Return the next entry from a shard iterator |
 | `dshmap_iter_next_after` | Return the entry after a currently present entry |
 | `DSHMAP_FOR_EACH` | Iterate all entries |
 | `DSHMAP_FOR_EACH_SAFE` | Iterate all entries while removing the current entry |
 | `DSHMAP_FOR_EACH_WITH_HASH` | Iterate entries with a matching full hash |
+| `DSHMAP_FOR_EACH_SHARD` | Iterate one read-only shard |
 
 Use `DSHMAP_INITIALIZER(hash_fn)` for static storage or aggregate
 initialization. Tables initialized this way are ready to use and still need
@@ -144,6 +147,23 @@ DSHMAP_FOR_EACH(entry, &map) {
 }
 ```
 
+Use `DSHMAP_FOR_EACH_SHARD` to split read-only iteration into independent
+shards. `shard_count` must be nonzero, and `shard` must be less than
+`shard_count`. Running every shard from `0` to `shard_count - 1` visits every
+entry exactly once across all shards:
+
+```c
+for (size_t shard = 0; shard < shard_count; shard++) {
+    DSHMAP_FOR_EACH_SHARD(entry, &map, shard, shard_count) {
+        process(entry);
+    }
+}
+```
+
+Shard iteration does not make the table thread-safe. It is only for reading.
+Do not insert, remove, clear, reserve, shrink, or destroy the table while shard
+iteration is active.
+
 Use `DSHMAP_FOR_EACH_SAFE` when the loop removes or frees the current entry:
 
 ```c
@@ -177,6 +197,19 @@ dshmap_iter_hash_init(&iter, &map, hash);
 for (void *entry = dshmap_iter_hash_next(&map, &iter);
      entry;
      entry = dshmap_iter_hash_next(&map, &iter)) {
+    process(entry);
+}
+```
+
+For manual shard iteration, use `dshmap_iter_shard_init()` and
+`dshmap_iter_shard_next()`:
+
+```c
+dshmap_iter iter;
+dshmap_iter_shard_init(&iter, &map, shard, shard_count);
+for (void *entry = dshmap_iter_shard_next(&map, &iter);
+     entry;
+     entry = dshmap_iter_shard_next(&map, &iter)) {
     process(entry);
 }
 ```

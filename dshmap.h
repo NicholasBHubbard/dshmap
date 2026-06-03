@@ -279,15 +279,18 @@ typedef struct dshmap {
  *
  * The fields are public so the type can be stack allocated, but callers
  * should not read or write them directly. Initialize with
- * dshmap_iter_init() for all entries, or dshmap_iter_hash_init() for entries
- * with one full hash. Then call the matching next function until it returns
- * NULL. Iteration order is arbitrary and may change after inserts or removes.
+ * dshmap_iter_init() for all entries, dshmap_iter_hash_init() for entries
+ * with one full hash, or dshmap_iter_shard_init() for one read-only shard.
+ * Then call the matching next function until it returns NULL. Iteration order
+ * is arbitrary and may change after inserts or removes.
  */
 typedef struct dshmap_iter {
     dshmap_hash_t hash;
     size_t group;
     size_t match_group;
     size_t probe;
+    size_t step;
+    size_t limit;
     uint64_t occupied;
 } dshmap_iter;
 
@@ -520,6 +523,24 @@ static inline void
 dshmap_iter_hash_init(dshmap_iter *iter, const dshmap *map,
                       dshmap_hash_t hash);
 
+/* dshmap_iter_shard_init - Initialize a read-only shard iterator.
+ *
+ * Sets up iter to visit the entries in one shard of map. shard_count must be
+ * nonzero, and shard must be less than shard_count. Running every shard from
+ * 0 to shard_count - 1 visits every entry exactly once across all shards.
+ *
+ * This only splits iteration work. It does not make map thread-safe. Do not
+ * insert, remove, clear, shrink, reserve, or destroy the table while any shard
+ * iterator is active. It is fine for several threads to read different shards
+ * of the same table if no thread mutates the table.
+ *
+ *     dshmap_iter iter;
+ *     dshmap_iter_shard_init(&iter, &map, shard, shard_count);
+ */
+static inline void
+dshmap_iter_shard_init(dshmap_iter *iter, const dshmap *map,
+                       size_t shard, size_t shard_count);
+
 /* dshmap_iter_next - Return the next entry from an iterator.
  *
  * Returns NULL when there are no more entries. Do not insert or remove
@@ -553,6 +574,22 @@ dshmap_iter_next(const dshmap *map, dshmap_iter *iter);
  */
 static inline void *
 dshmap_iter_hash_next(const dshmap *map, dshmap_iter *iter);
+
+/* dshmap_iter_shard_next - Return the next entry from a shard iterator.
+ *
+ * Returns NULL when there are no more entries in the shard passed to
+ * dshmap_iter_shard_init(). Do not mutate the table while using this iterator.
+ *
+ *     dshmap_iter iter;
+ *     dshmap_iter_shard_init(&iter, &map, shard, shard_count);
+ *     for (void *entry = dshmap_iter_shard_next(&map, &iter);
+ *          entry;
+ *          entry = dshmap_iter_shard_next(&map, &iter)) {
+ *         process(entry);
+ *     }
+ */
+static inline void *
+dshmap_iter_shard_next(const dshmap *map, dshmap_iter *iter);
 
 /* dshmap_iter_next_after - Return the entry after another entry.
  *
@@ -627,6 +664,36 @@ dshmap_iter_next_after(const dshmap *map, const void *entry);
     for (void *var = dshmap_iter_hash_next(var##_map_, var##_iterp_); \
          var; \
          var = dshmap_iter_hash_next(var##_map_, var##_iterp_))
+
+/* DSHMAP_FOR_EACH_SHARD - Iterate over one read-only shard.
+ *
+ * 'var' is declared as void * in the loop scope. shard_count must be nonzero,
+ * and shard must be less than shard_count. Running this macro for every shard
+ * from 0 to shard_count - 1 visits every entry exactly once across all shards.
+ * The map, shard, and shard_count expressions are evaluated once. Iteration
+ * order is arbitrary. Do not mutate the table while shard iteration is active.
+ *
+ *     for (size_t shard = 0; shard < shard_count; shard++) {
+ *         DSHMAP_FOR_EACH_SHARD(entry, &map, shard, shard_count) {
+ *             process(entry);
+ *         }
+ *     }
+ */
+#define DSHMAP_FOR_EACH_SHARD(var, map, shard, shard_count) \
+    for (const dshmap *var##_map_ = (map); var##_map_; var##_map_ = NULL) \
+    for (size_t var##_shard_ = (shard), \
+                var##_shard_count_ = (shard_count), \
+                var##_once_ = 1; \
+         var##_once_; \
+         var##_once_ = 0) \
+    for (dshmap_iter var##_iter_, *var##_iterp_ = \
+             (dshmap_iter_shard_init(&var##_iter_, var##_map_, \
+                                     var##_shard_, var##_shard_count_), \
+              &var##_iter_); \
+         var##_iterp_; var##_iterp_ = NULL) \
+    for (void *var = dshmap_iter_shard_next(var##_map_, var##_iterp_); \
+         var; \
+         var = dshmap_iter_shard_next(var##_map_, var##_iterp_))
 
 /* ===========================================================================
  *                                INTERNAL
@@ -1396,6 +1463,8 @@ dshmap_iter_init(dshmap_iter *iter, const dshmap *map)
     iter->group = 0;
     iter->match_group = 0;
     iter->probe = 0;
+    iter->step = 1;
+    iter->limit = 0;
     iter->occupied = 0;
 }
 
@@ -1406,6 +1475,8 @@ dshmap_iter_hash_init(dshmap_iter *iter, const dshmap *map,
     iter->hash = hash;
     iter->match_group = 0;
     iter->probe = 0;
+    iter->step = 1;
+    iter->limit = 0;
     iter->occupied = 0;
 
     if (!dshmap__is_allocated(map)) {
@@ -1416,6 +1487,28 @@ dshmap_iter_hash_init(dshmap_iter *iter, const dshmap *map,
     } else {
         iter->group = dshmap__group_index(map, hash);
     }
+}
+
+static inline void
+dshmap_iter_shard_init(dshmap_iter *iter, const dshmap *map,
+                       size_t shard, size_t shard_count)
+{
+    iter->hash = 0;
+    iter->group = DSHMAP__SMALL_END;
+    iter->match_group = 0;
+    iter->probe = 0;
+    iter->step = shard_count;
+    iter->limit = 0;
+    iter->occupied = 0;
+
+    if (DSHMAP__UNLIKELY(shard_count == 0 || shard >= shard_count) ||
+        !dshmap__is_allocated(map)) {
+        return;
+    }
+
+    iter->group = shard;
+    iter->limit = dshmap__is_small(map) ? dshmap__small_capacity(map)
+                                        : map->group_mask + 1;
 }
 
 static inline void *
@@ -1498,6 +1591,46 @@ dshmap_iter_hash_next(const dshmap *map, dshmap_iter *iter)
             iter->group = dshmap__next_group_index(map, group, iter->probe);
             iter->probe++;
         }
+    }
+}
+
+static inline void *
+dshmap_iter_shard_next(const dshmap *map, dshmap_iter *iter)
+{
+    if (!dshmap__is_allocated(map) || iter->group == DSHMAP__SMALL_END) {
+        return NULL;
+    }
+
+    if (dshmap__is_small(map)) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        while (iter->group < iter->limit) {
+            size_t index = iter->group;
+            iter->group = iter->step > iter->limit - iter->group
+                        ? iter->limit
+                        : iter->group + iter->step;
+            if (nodes[index].entry != NULL) {
+                return nodes[index].entry;
+            }
+        }
+        return NULL;
+    }
+
+    for (;;) {
+        if (iter->occupied) {
+            size_t pos = dshmap__slot_pos(
+                iter->match_group,
+                dshmap__ctrl_next_match(&iter->occupied));
+            return map->slots[pos];
+        }
+        if (iter->group >= iter->limit) {
+            return NULL;
+        }
+        iter->match_group = iter->group;
+        iter->occupied = dshmap__ctrl_occupied(
+            dshmap__load_ctrl(map, iter->group));
+        iter->group = iter->step > iter->limit - iter->group
+                    ? iter->limit
+                    : iter->group + iter->step;
     }
 }
 
