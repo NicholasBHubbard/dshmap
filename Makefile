@@ -53,6 +53,17 @@ test-config-matrix: tests/test.c dshmap.h
 	    $(CC) $(CFLAGS) $$defs -o /tmp/dshmap-test-$$name tests/test.c; \
 	    /tmp/dshmap-test-$$name >/dev/null; \
 	    printf 'ok\n'; \
+	done; \
+	for cfg in \
+	    "cast_align_strict:" \
+	    "cast_align_strict_hashes:-DDSHMAP_SWISS_STORE_HASHES=1"; \
+	do \
+	    name=$${cfg%%:*}; \
+	    defs=$${cfg#*:}; \
+	    printf 'warning %-20s ' "$$name"; \
+	    $(CC) $(CFLAGS) -Wcast-align=strict $$defs -o /tmp/dshmap-test-$$name tests/test.c; \
+	    /tmp/dshmap-test-$$name >/dev/null; \
+	    printf 'ok\n'; \
 	done
 
 bench: bench/bench.c dshmap.h

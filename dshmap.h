@@ -574,6 +574,7 @@ dshmap_iter_next_after(const dshmap *map, const void *entry);
 
 #define DSHMAP__LIKELY(x)   __builtin_expect(!!(x), 1)
 #define DSHMAP__UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define DSHMAP__ALIGNOF(type) __alignof__(type)
 
 enum {
     DSHMAP__EMPTY   = (int8_t)0x80,
@@ -851,6 +852,13 @@ dshmap__checked_mul(size_t a, size_t b)
 }
 
 static inline size_t
+dshmap__align_up(size_t n, size_t align)
+{
+    size_t rem = n % align;
+    return rem ? dshmap__checked_add(n, align - rem) : n;
+}
+
+static inline size_t
 dshmap__capacity_from_groups(size_t groups)
 {
     return dshmap__checked_mul(groups, DSHMAP__GROUP_WIDTH);
@@ -938,12 +946,13 @@ dshmap__groups_for_count(size_t count, size_t groups)
 static inline void
 dshmap__swiss_alloc(dshmap *map, size_t cap)
 {
-    size_t slots_off = cap;
+    size_t offset = cap;
 #if DSHMAP_SWISS_STORE_HASHES
-    size_t hashes_off = cap;
+    size_t hashes_off = dshmap__align_up(offset, DSHMAP__ALIGNOF(dshmap_hash_t));
     size_t hashes_bytes = dshmap__checked_mul(cap, sizeof(dshmap_hash_t));
-    slots_off = dshmap__checked_add(hashes_off, hashes_bytes);
+    offset = dshmap__checked_add(hashes_off, hashes_bytes);
 #endif
+    size_t slots_off = dshmap__align_up(offset, DSHMAP__ALIGNOF(void *));
     size_t slots_bytes = dshmap__checked_mul(cap, sizeof(void *));
     size_t alloc_size = dshmap__checked_add(slots_off, slots_bytes);
     char *mem = (char *)DSHMAP_MALLOC(alloc_size);
@@ -952,9 +961,9 @@ dshmap__swiss_alloc(dshmap *map, size_t cap)
     }
     map->ctrl = (int8_t *)mem;
     memset(map->ctrl, DSHMAP__EMPTY, cap);
-    map->slots = (void **)(mem + slots_off);
+    map->slots = (void **)(void *)(mem + slots_off);
 #if DSHMAP_SWISS_STORE_HASHES
-    map->hashes = (dshmap_hash_t *)(mem + hashes_off);
+    map->hashes = (dshmap_hash_t *)(void *)(mem + hashes_off);
 #else
     map->hashes = NULL;
 #endif

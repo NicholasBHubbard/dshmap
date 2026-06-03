@@ -66,6 +66,19 @@ test_swiss_group_mask_for_count(size_t count)
 }
 
 static void
+test_force_swiss(dshmap *map, size_t count)
+{
+    size_t reserve_count = count;
+#if DSHMAP_SMALL_THRESHOLD != 0
+    if (reserve_count <= DSHMAP_SMALL_THRESHOLD) {
+        reserve_count = (size_t)DSHMAP_SMALL_THRESHOLD + 1;
+    }
+#endif
+    dshmap_reserve(map, reserve_count);
+    assert(!map->small);
+}
+
+static void
 test_lifecycle(void)
 {
     dshmap map;
@@ -569,6 +582,37 @@ test_reuse_deep_tombstone_before_grow(void)
 }
 
 static void
+test_swiss_reuses_tombstone_before_growth(void)
+{
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+    test_force_swiss(&map, 32);
+
+    for (size_t i = 1; i <= DSHMAP__GROUP_WIDTH; i++) {
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
+    }
+    fill_until_growth_left_zero(&map, DSHMAP__GROUP_WIDTH + 1);
+
+    size_t mask = map.group_mask;
+    size_t size = dshmap_size(&map);
+    assert(map.growth_left == 0);
+
+    dshmap_remove(&map, (void *)1, dummy_hash((void *)1));
+    assert(map.growth_left == 0);
+
+    void *replacement = (void *)(((map.group_mask + 1) << 7) | 77);
+    dshmap_insert(&map, replacement, dummy_hash(replacement));
+
+    assert(map.group_mask == mask);
+    assert(map.growth_left == 0);
+    assert(dshmap_size(&map) == size);
+    assert(dshmap_find(&map, dummy_hash((void *)1)) == NULL);
+    assert(dshmap_find(&map, dummy_hash(replacement)) == replacement);
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_swiss_single_group_upper_half(void)
 {
 #if DSHMAP_SMALL_THRESHOLD != 0 || DSHMAP__GROUP_WIDTH != 16
@@ -711,6 +755,34 @@ test_find_key_skips_same_h2_noise(void)
 
     key = 99;
     assert(dshmap_find_key(&map, target_hash, &key, hashed_entry_eq) == NULL);
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_swiss_find_key_miss_paths(void)
+{
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+    test_force_swiss(&map, 16);
+
+    dshmap_hash_t target_hash = 0x2A;
+    struct hashed_entry a = { .key = 1, .hash = target_hash };
+    struct hashed_entry b = { .key = 2, .hash = 0xAA };
+    struct hashed_entry c = { .key = 3, .hash = 0x12A };
+
+    dshmap_insert(&map, &a, a.hash);
+    dshmap_insert(&map, &b, b.hash);
+    dshmap_insert(&map, &c, c.hash);
+
+    int key = 99;
+    assert(dshmap_find_key(&map, target_hash, &key, hashed_entry_eq) == NULL);
+
+    key = 1;
+    void *first = dshmap_find_key(&map, target_hash, &key, hashed_entry_eq);
+    assert(first == &a);
+    assert(dshmap_find_key_next(&map, target_hash, &key,
+                                hashed_entry_eq, first) == NULL);
 
     dshmap_destroy(&map);
 }
@@ -1477,6 +1549,42 @@ test_iterator_api(void)
 }
 
 static void
+test_swiss_iter_next_after(void)
+{
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+
+    assert(dshmap_iter_next_after(&map, (void *)1) == NULL);
+    test_force_swiss(&map, 32);
+    assert(dshmap_iter_next_after(&map, NULL) == NULL);
+
+    void *entries[32];
+    for (size_t i = 0; i < 32; i++) {
+        entries[i] = (void *)(i + 1);
+        dshmap_insert(&map, entries[i], dummy_hash(entries[i]));
+    }
+
+    void *seen[32];
+    size_t count = 0;
+    dshmap_iter iter;
+    dshmap_iter_init(&iter, &map);
+    for (void *entry = dshmap_iter_next(&map, &iter);
+         entry;
+         entry = dshmap_iter_next(&map, &iter)) {
+        assert(count < 32);
+        seen[count++] = entry;
+    }
+    assert(count == 32);
+
+    for (size_t i = 0; i + 1 < count; i++) {
+        assert(dshmap_iter_next_after(&map, seen[i]) == seen[i + 1]);
+    }
+    assert(dshmap_iter_next_after(&map, seen[count - 1]) == NULL);
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_safe_iteration_removes_small_chain(void)
 {
     if (DSHMAP_SMALL_THRESHOLD < 8) {
@@ -2024,11 +2132,13 @@ main(void)
     RUN_TEST(test_tombstone_preserves_probe_chain);
     RUN_TEST(test_probe_wraparound);
     RUN_TEST(test_reuse_deep_tombstone_before_grow);
+    RUN_TEST(test_swiss_reuses_tombstone_before_growth);
     RUN_TEST(test_swiss_single_group_upper_half);
     RUN_TEST(test_find_key_resolves_hash_collision);
     RUN_TEST(test_find_key_next);
     RUN_TEST(test_find_key_does_not_rehash_candidates);
     RUN_TEST(test_find_key_skips_same_h2_noise);
+    RUN_TEST(test_swiss_find_key_miss_paths);
     RUN_TEST(test_small_hash_storage_policy);
     RUN_TEST(test_small_mode_uses_pooled_chaining);
     RUN_TEST(test_small_remove_preserves_chain);
@@ -2051,6 +2161,7 @@ main(void)
     RUN_TEST(test_iteration);
     RUN_TEST(test_iteration_empty);
     RUN_TEST(test_iterator_api);
+    RUN_TEST(test_swiss_iter_next_after);
     RUN_TEST(test_safe_iteration_removes_small_chain);
     RUN_TEST(test_safe_iteration_removes_swiss_table);
     RUN_TEST(test_find_empty);
