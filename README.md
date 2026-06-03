@@ -185,6 +185,12 @@ Run the test suite:
 make test
 ```
 
+Run the compile-time configuration matrix:
+
+```
+make test-config-matrix
+```
+
 Run with AddressSanitizer and UndefinedBehaviorSanitizer:
 
 ```

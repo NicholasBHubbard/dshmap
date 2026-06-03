@@ -54,6 +54,13 @@ test-config-matrix: tests/test.c dshmap.h
 	    /tmp/dshmap-test-$$name >/dev/null; \
 	    printf 'ok\n'; \
 	done; \
+	cast_align_warning=-Wcast-align; \
+	if printf 'int dshmap_warning_probe;\n' | \
+	    $(CC) $(CFLAGS) -Wcast-align=strict -x c -c -o /tmp/dshmap-cast-align-probe.o - >/dev/null 2>&1; \
+	then \
+	    cast_align_warning=-Wcast-align=strict; \
+	fi; \
+	rm -f /tmp/dshmap-cast-align-probe.o; \
 	for cfg in \
 	    "cast_align_strict:" \
 	    "cast_align_strict_hashes:-DDSHMAP_SWISS_STORE_HASHES=1"; \
@@ -61,7 +68,7 @@ test-config-matrix: tests/test.c dshmap.h
 	    name=$${cfg%%:*}; \
 	    defs=$${cfg#*:}; \
 	    printf 'warning %-20s ' "$$name"; \
-	    $(CC) $(CFLAGS) -Wcast-align=strict $$defs -o /tmp/dshmap-test-$$name tests/test.c; \
+	    $(CC) $(CFLAGS) $$cast_align_warning $$defs -o /tmp/dshmap-test-$$name tests/test.c; \
 	    /tmp/dshmap-test-$$name >/dev/null; \
 	    printf 'ok\n'; \
 	done

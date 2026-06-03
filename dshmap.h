@@ -328,6 +328,18 @@ dshmap_destroy(dshmap *map);
 static inline void
 dshmap_clear(dshmap *map);
 
+/* dshmap_shrink - Reduce allocated capacity to fit the current size.
+ *
+ * Keeps all current entries. If the table is empty, frees its storage.
+ * Small tables stay small. Swiss tables stay Swiss, even if the current
+ * size is below DSHMAP_SMALL_THRESHOLD. This avoids changing the table
+ * mode after promotion. The table keeps the same hash_fn.
+ *
+ *     dshmap_shrink(&map);
+ */
+static inline void
+dshmap_shrink(dshmap *map);
+
 /* dshmap_reserve - Pre-allocate capacity for at least 'count' entries.
  *
  * No-op if the table can already hold 'count' entries without resizing.
@@ -1237,6 +1249,25 @@ dshmap_clear(dshmap *map)
             memset(map->ctrl, DSHMAP__EMPTY, cap);
             map->size = 0;
             map->growth_left = dshmap__growth_left_for_cap(cap);
+        }
+    }
+}
+
+static inline void
+dshmap_shrink(dshmap *map)
+{
+    if (map->size == 0) {
+        dshmap_destroy(map);
+    } else if (dshmap__is_small(map)) {
+        size_t new_cap = dshmap__small_cap_for_count(map->size);
+        if (new_cap < dshmap__small_capacity(map)) {
+            dshmap__small_grow_to(map, new_cap);
+        }
+    } else {
+        size_t old_groups = dshmap__checked_add(map->group_mask, 1);
+        size_t new_groups = dshmap__groups_for_count(map->size, 1);
+        if (new_groups < old_groups) {
+            dshmap__swiss_grow_to(map, new_groups);
         }
     }
 }
