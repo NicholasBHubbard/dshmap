@@ -1716,6 +1716,72 @@ test_iterator_api(void)
 }
 
 static void
+test_hash_iterator_api(void)
+{
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+
+    dshmap_hash_t target_hash = 0x2A;
+    struct hashed_entry a = { .key = 1, .hash = target_hash };
+    struct hashed_entry b = { .key = 2, .hash = target_hash };
+    struct hashed_entry c = { .key = 3, .hash = target_hash };
+    struct hashed_entry noise1 = { .key = 4, .hash = 0xAA };
+    struct hashed_entry noise2 = { .key = 5, .hash = 0x12A };
+
+    dshmap_insert(&map, &noise1, noise1.hash);
+    dshmap_insert(&map, &a, a.hash);
+    dshmap_insert(&map, &noise2, noise2.hash);
+    dshmap_insert(&map, &b, b.hash);
+    dshmap_insert(&map, &c, c.hash);
+
+    dshmap_iter iter;
+    dshmap_iter_hash_init(&iter, &map, target_hash);
+
+    bool found_a = false, found_b = false, found_c = false;
+    size_t count = 0;
+    for (void *entry = dshmap_iter_hash_next(&map, &iter);
+         entry;
+         entry = dshmap_iter_hash_next(&map, &iter)) {
+        count++;
+        if (entry == &a) found_a = true;
+        else if (entry == &b) found_b = true;
+        else if (entry == &c) found_c = true;
+        else assert(0 && "hash iterator returned same-H2 noise");
+    }
+    assert(count == 3);
+    assert(found_a && found_b && found_c);
+    assert(dshmap_iter_hash_next(&map, &iter) == NULL);
+
+    dshmap_iter_hash_init(&iter, &map, 0x1234);
+    assert(dshmap_iter_hash_next(&map, &iter) == NULL);
+
+#if DSHMAP_SMALL_THRESHOLD != 0
+    dshmap_reserve(&map, DSHMAP_SMALL_THRESHOLD + 1);
+#endif
+    assert(!map.small);
+
+    dshmap_iter_hash_init(&iter, &map, target_hash);
+    found_a = found_b = found_c = false;
+    count = 0;
+    for (void *entry = dshmap_iter_hash_next(&map, &iter);
+         entry;
+         entry = dshmap_iter_hash_next(&map, &iter)) {
+        count++;
+        if (entry == &a) found_a = true;
+        else if (entry == &b) found_b = true;
+        else if (entry == &c) found_c = true;
+        else assert(0 && "Swiss hash iterator returned same-H2 noise");
+    }
+    assert(count == 3);
+    assert(found_a && found_b && found_c);
+
+    dshmap_iter_hash_init(&iter, &map, 0x1234);
+    assert(dshmap_iter_hash_next(&map, &iter) == NULL);
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_swiss_iter_next_after(void)
 {
     dshmap map;
@@ -2338,6 +2404,7 @@ main(void)
     RUN_TEST(test_iteration);
     RUN_TEST(test_iteration_empty);
     RUN_TEST(test_iterator_api);
+    RUN_TEST(test_hash_iterator_api);
     RUN_TEST(test_swiss_iter_next_after);
     RUN_TEST(test_safe_iteration_removes_small_chain);
     RUN_TEST(test_safe_iteration_removes_swiss_table);

@@ -275,15 +275,19 @@ typedef struct dshmap {
 #define DSHMAP_INITIALIZER(HASH_FN) \
     { (int8_t *)dshmap__empty_ctrl, NULL, NULL, (HASH_FN), 0, 0, 0, false }
 
-/* dshmap_iter - Cursor for iterating all entries.
+/* dshmap_iter - Cursor for iterating entries.
  *
  * The fields are public so the type can be stack allocated, but callers
  * should not read or write them directly. Initialize with
- * dshmap_iter_init(), then call dshmap_iter_next() until it returns NULL.
- * Iteration order is arbitrary and may change after inserts or removes.
+ * dshmap_iter_init() for all entries, or dshmap_iter_hash_init() for entries
+ * with one full hash. Then call the matching next function until it returns
+ * NULL. Iteration order is arbitrary and may change after inserts or removes.
  */
 typedef struct dshmap_iter {
+    dshmap_hash_t hash;
     size_t group;
+    size_t match_group;
+    size_t probe;
     uint64_t occupied;
 } dshmap_iter;
 
@@ -504,6 +508,18 @@ dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash);
 static inline void
 dshmap_iter_init(dshmap_iter *iter, const dshmap *map);
 
+/* dshmap_iter_hash_init - Initialize a hash iterator.
+ *
+ * Sets up iter to visit each entry in map whose full hash equals hash.
+ * The iterator starts before the first matching entry.
+ *
+ *     dshmap_iter iter;
+ *     dshmap_iter_hash_init(&iter, &map, hash);
+ */
+static inline void
+dshmap_iter_hash_init(dshmap_iter *iter, const dshmap *map,
+                      dshmap_hash_t hash);
+
 /* dshmap_iter_next - Return the next entry from an iterator.
  *
  * Returns NULL when there are no more entries. Do not insert or remove
@@ -520,6 +536,23 @@ dshmap_iter_init(dshmap_iter *iter, const dshmap *map);
  */
 static inline void *
 dshmap_iter_next(const dshmap *map, dshmap_iter *iter);
+
+/* dshmap_iter_hash_next - Return the next entry from a hash iterator.
+ *
+ * Returns NULL when there are no more entries with the hash passed to
+ * dshmap_iter_hash_init(). Do not insert or remove entries while using
+ * this iterator.
+ *
+ *     dshmap_iter iter;
+ *     dshmap_iter_hash_init(&iter, &map, hash);
+ *     for (void *entry = dshmap_iter_hash_next(&map, &iter);
+ *          entry;
+ *          entry = dshmap_iter_hash_next(&map, &iter)) {
+ *         process(entry);
+ *     }
+ */
+static inline void *
+dshmap_iter_hash_next(const dshmap *map, dshmap_iter *iter);
 
 /* dshmap_iter_next_after - Return the entry after another entry.
  *
@@ -587,13 +620,13 @@ dshmap_iter_next_after(const dshmap *map, const void *entry);
  */
 #define DSHMAP_FOR_EACH_WITH_HASH(var, map, hash) \
     for (const dshmap *var##_map_ = (map); var##_map_; var##_map_ = NULL) \
-    for (bool var##_once_ = true; var##_once_; ) \
-    for (dshmap_hash_t var##_hash_ = (hash); \
-         var##_once_; \
-         var##_once_ = false) \
-    for (void *var = dshmap_find(var##_map_, var##_hash_); \
+    for (dshmap_iter var##_iter_, *var##_iterp_ = \
+             (dshmap_iter_hash_init(&var##_iter_, var##_map_, (hash)), \
+              &var##_iter_); \
+         var##_iterp_; var##_iterp_ = NULL) \
+    for (void *var = dshmap_iter_hash_next(var##_map_, var##_iterp_); \
          var; \
-         var = dshmap_find_next(var##_map_, var##_hash_, var))
+         var = dshmap_iter_hash_next(var##_map_, var##_iterp_))
 
 /* ===========================================================================
  *                                INTERNAL
@@ -1359,8 +1392,30 @@ static inline void
 dshmap_iter_init(dshmap_iter *iter, const dshmap *map)
 {
     (void)map;
+    iter->hash = 0;
     iter->group = 0;
+    iter->match_group = 0;
+    iter->probe = 0;
     iter->occupied = 0;
+}
+
+static inline void
+dshmap_iter_hash_init(dshmap_iter *iter, const dshmap *map,
+                      dshmap_hash_t hash)
+{
+    iter->hash = hash;
+    iter->match_group = 0;
+    iter->probe = 0;
+    iter->occupied = 0;
+
+    if (!dshmap__is_allocated(map)) {
+        iter->group = DSHMAP__SMALL_END;
+    } else if (dshmap__is_small(map)) {
+        iter->group = dshmap__small_buckets(map)[
+            dshmap__small_bucket_index(map, hash)];
+    } else {
+        iter->group = dshmap__group_index(map, hash);
+    }
 }
 
 static inline void *
@@ -1395,6 +1450,54 @@ dshmap_iter_next(const dshmap *map, dshmap_iter *iter)
         iter->occupied = dshmap__ctrl_occupied(
             dshmap__load_ctrl(map, iter->group));
         iter->group++;
+    }
+}
+
+static inline void *
+dshmap_iter_hash_next(const dshmap *map, dshmap_iter *iter)
+{
+    if (!dshmap__is_allocated(map)) {
+        return NULL;
+    }
+
+    if (dshmap__is_small(map)) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        while (iter->group != DSHMAP__SMALL_END) {
+            size_t index = iter->group;
+            iter->group = nodes[index].next;
+            if (nodes[index].hash == iter->hash) {
+                return nodes[index].entry;
+            }
+        }
+        return NULL;
+    }
+
+    uint8_t h2 = dshmap__h2(iter->hash);
+    for (;;) {
+        if (iter->occupied) {
+            size_t pos = dshmap__slot_pos(
+                iter->match_group,
+                dshmap__ctrl_next_match(&iter->occupied));
+            if (dshmap__slot_hash(map, pos) == iter->hash) {
+                return map->slots[pos];
+            }
+            continue;
+        }
+
+        if (iter->probe > map->group_mask) {
+            return NULL;
+        }
+
+        size_t group = iter->group;
+        dshmap__ctrl_group ctrl = dshmap__load_ctrl(map, group);
+        iter->match_group = group;
+        iter->occupied = dshmap__ctrl_match(ctrl, h2);
+        if (dshmap__group_has_empty(ctrl)) {
+            iter->probe = map->group_mask + 1;
+        } else {
+            iter->group = dshmap__next_group_index(map, group, iter->probe);
+            iter->probe++;
+        }
     }
 }
 

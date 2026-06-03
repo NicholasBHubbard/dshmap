@@ -74,6 +74,8 @@ Full documentation is in `dshmap.h`.
 | `dshmap_remove` | Remove an entry by pointer |
 | `dshmap_iter_init` | Initialize an all-entry iterator |
 | `dshmap_iter_next` | Return the next entry from an iterator |
+| `dshmap_iter_hash_init` | Initialize an iterator for one full hash |
+| `dshmap_iter_hash_next` | Return the next entry from a hash iterator |
 | `dshmap_iter_next_after` | Return the entry after a currently present entry |
 | `DSHMAP_FOR_EACH` | Iterate all entries |
 | `DSHMAP_FOR_EACH_SAFE` | Iterate all entries while removing the current entry |
@@ -162,6 +164,19 @@ dshmap_iter_init(&iter, &map);
 for (void *entry = dshmap_iter_next(&map, &iter);
      entry;
      entry = dshmap_iter_next(&map, &iter)) {
+    process(entry);
+}
+```
+
+To manually iterate only entries with one full hash, use the same iterator
+type with the hash-specific functions:
+
+```c
+dshmap_iter iter;
+dshmap_iter_hash_init(&iter, &map, hash);
+for (void *entry = dshmap_iter_hash_next(&map, &iter);
+     entry;
+     entry = dshmap_iter_hash_next(&map, &iter)) {
     process(entry);
 }
 ```
