@@ -1,14 +1,18 @@
 CC      ?= gcc
+CXX     ?= c++
 CFLAGS  := -O2 -Wall -Wextra -Werror -std=c99
+CXXFLAGS := -O2 -Wall -Wextra -Werror -std=c++11
 ASANFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 .PHONY: test test-asan test-config-matrix bench coverage clean
 
-test: tests/test.c tests/test_oom.c bench/bench.c dshmap.h
+test: tests/test.c tests/test.cpp tests/test_oom.c bench/bench.c dshmap.h
 	$(CC) $(CFLAGS) -o tests/test tests/test.c
 	./tests/test
 	$(CC) $(CFLAGS) -DDSHMAP_SMALL_THRESHOLD=16 -o tests/test-small-threshold tests/test.c
 	./tests/test-small-threshold
+	$(CXX) $(CXXFLAGS) -o tests/test-cxx tests/test.cpp
+	./tests/test-cxx
 	$(CC) $(CFLAGS) -o tests/test-oom tests/test_oom.c
 	./tests/test-oom
 	$(CC) $(CFLAGS) -o bench/bench bench/bench.c
@@ -85,5 +89,5 @@ coverage: tests/test.c dshmap.h
 	@echo "Coverage report: dshmap.h.gcov"
 
 clean:
-	rm -f tests/test tests/test-asan tests/test-small-threshold tests/test-small-threshold-asan tests/test-oom tests/test-oom-asan tests/test-cov bench/bench
+	rm -f tests/test tests/test-cxx tests/test-asan tests/test-small-threshold tests/test-small-threshold-asan tests/test-oom tests/test-oom-asan tests/test-cov bench/bench
 	rm -f tests/*.gcno tests/*.gcda *.gcov
