@@ -63,6 +63,7 @@ Full documentation is in `dshmap.h`.
 | `dshmap_clear` | Remove all entries, keep capacity |
 | `dshmap_shrink` | Reduce capacity to fit the current size |
 | `dshmap_reserve` | Pre-allocate capacity |
+| `dshmap_capacity` | Current live-entry capacity |
 | `dshmap_size` | Number of entries |
 | `dshmap_is_empty` | Check if empty |
 | `dshmap_insert` | Insert a non-`NULL` entry; inserting the same entry pointer twice without removing it first is unsupported |

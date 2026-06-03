@@ -356,6 +356,21 @@ dshmap_shrink(dshmap *map);
 static inline void
 dshmap_reserve(dshmap *map, size_t count);
 
+/* dshmap_capacity - Return the current live-entry capacity.
+ *
+ * Returns 0 when the table has no allocation. Small mode returns the
+ * current pooled-node capacity, capped by DSHMAP_SMALL_THRESHOLD. Swiss
+ * mode returns the maximum live entries allowed by the load factor for
+ * the current slot allocation.
+ *
+ * Deletes can leave tombstones in Swiss mode, so this is not a promise
+ * that every insert sequence can reach this count without resizing.
+ *
+ *     size_t capacity = dshmap_capacity(&map);
+ */
+static inline size_t
+dshmap_capacity(const dshmap *map);
+
 /* dshmap_size - Return the number of entries in the table.
  *
  *     if (dshmap_size(&map) > 1000) {
@@ -1310,6 +1325,22 @@ dshmap_reserve(dshmap *map, size_t count)
         new_groups = dshmap__groups_for_count(count, new_groups);
         dshmap__swiss_grow_to(map, new_groups);
     }
+}
+
+static inline size_t
+dshmap_capacity(const dshmap *map)
+{
+    if (!dshmap__is_allocated(map)) {
+        return 0;
+    }
+
+    if (dshmap__is_small(map)) {
+        size_t cap = dshmap__small_capacity(map);
+        return cap > DSHMAP_SMALL_THRESHOLD ? DSHMAP_SMALL_THRESHOLD : cap;
+    }
+
+    return dshmap__growth_left_for_cap(dshmap__capacity_from_groups(
+        dshmap__checked_add(map->group_mask, 1)));
 }
 
 static inline size_t

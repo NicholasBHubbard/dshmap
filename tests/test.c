@@ -363,6 +363,7 @@ model_check_all(const dshmap *map, const struct model_entry *entries)
 
     assert(dshmap_size(map) == live);
     assert(dshmap_is_empty(map) == (live == 0));
+    assert(dshmap_capacity(map) >= live);
 
     DSHMAP_FOR_EACH(entry, map) {
         size_t idx = model_index(entries, entry);
@@ -1424,6 +1425,81 @@ test_reserve_after_tombstone_churn(void)
 }
 
 static void
+test_capacity_empty(void)
+{
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+
+    assert(dshmap_capacity(&map) == 0);
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_capacity_small_table(void)
+{
+#if DSHMAP_SMALL_THRESHOLD == 0
+    return;
+#else
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+
+    size_t reserve_count = DSHMAP_SMALL_THRESHOLD < 5 ?
+        (size_t)DSHMAP_SMALL_THRESHOLD : 5;
+    dshmap_reserve(&map, reserve_count);
+    assert(map.small);
+
+    size_t expected = dshmap__small_capacity(&map);
+    if (expected > DSHMAP_SMALL_THRESHOLD) {
+        expected = DSHMAP_SMALL_THRESHOLD;
+    }
+    assert(dshmap_capacity(&map) == expected);
+    assert(dshmap_capacity(&map) >= reserve_count);
+
+    for (size_t i = 1; i <= reserve_count; i++) {
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
+    }
+    assert(dshmap_capacity(&map) == expected);
+
+    dshmap_destroy(&map);
+#endif
+}
+
+static void
+test_capacity_swiss_table(void)
+{
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+    test_force_swiss(&map, 128);
+    assert(!map.small);
+
+    size_t expected = dshmap__growth_left_for_cap(
+        dshmap__capacity_from_groups(map.group_mask + 1));
+    assert(dshmap_capacity(&map) == expected);
+
+    struct hashed_entry entries[16];
+    for (size_t i = 0; i < 16; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = ((dshmap_hash_t)(i * 4) << 7) | (i + 1);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+    }
+    assert(dshmap_capacity(&map) == expected);
+
+    for (size_t i = 0; i < 16; i += 2) {
+        dshmap_remove(&map, &entries[i], entries[i].hash);
+    }
+    assert(dshmap_capacity(&map) == expected);
+
+    dshmap_shrink(&map);
+    expected = dshmap__growth_left_for_cap(
+        dshmap__capacity_from_groups(map.group_mask + 1));
+    assert(dshmap_capacity(&map) == expected);
+    assert(dshmap_capacity(&map) >= dshmap_size(&map));
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_shrink_empty_frees_storage(void)
 {
     dshmap map;
@@ -2251,6 +2327,9 @@ main(void)
     RUN_TEST(test_reserve_promotes_small_table);
     RUN_TEST(test_swiss_reserve_noop_and_growth);
     RUN_TEST(test_reserve_after_tombstone_churn);
+    RUN_TEST(test_capacity_empty);
+    RUN_TEST(test_capacity_small_table);
+    RUN_TEST(test_capacity_swiss_table);
     RUN_TEST(test_shrink_empty_frees_storage);
     RUN_TEST(test_shrink_small_table);
     RUN_TEST(test_shrink_swiss_table_does_not_demote);
