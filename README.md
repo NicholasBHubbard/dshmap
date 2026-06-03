@@ -61,6 +61,7 @@ Full documentation is in `dshmap.h`.
 | `dshmap_init` | Initialize a table |
 | `dshmap_destroy` | Free table memory |
 | `dshmap_clear` | Remove all entries, keep capacity |
+| `dshmap_shrink` | Reduce capacity to fit the current size |
 | `dshmap_reserve` | Pre-allocate capacity |
 | `dshmap_size` | Number of entries |
 | `dshmap_is_empty` | Check if empty |
@@ -370,7 +371,3 @@ Values are bytes per entry.
 
 The benchmark (`make bench`) uses Linux `perf_event_open` for hardware
 counters but falls back to wall-clock timing on other platforms.
-
-## License
-
-MIT
