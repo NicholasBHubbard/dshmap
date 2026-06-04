@@ -2028,6 +2028,102 @@ test_swiss_iter_next_after(void)
 }
 
 static void
+test_small_iter_next_after_hash(void)
+{
+    if (DSHMAP_SMALL_THRESHOLD < 8) {
+        return;
+    }
+
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+
+    assert(dshmap_iter_next_after_hash(&map, NULL, 0) == NULL);
+    assert(dshmap_iter_next_after_hash(&map, (void *)1, 1) == NULL);
+
+    struct hashed_entry entries[8];
+    for (size_t i = 0; i < 8; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (dshmap_hash_t)(0x100 + i * 0x80);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+    }
+    assert(map.small);
+
+    dshmap_remove(&map, &entries[2], entries[2].hash);
+    dshmap_remove(&map, &entries[5], entries[5].hash);
+
+    void *seen[8];
+    size_t count = 0;
+    dshmap_iter iter;
+    dshmap_iter_init(&iter, &map);
+    for (void *entry = dshmap_iter_next(&map, &iter);
+         entry;
+         entry = dshmap_iter_next(&map, &iter)) {
+        assert(count < 8);
+        seen[count++] = entry;
+    }
+    assert(count == 6);
+
+    for (size_t i = 0; i + 1 < count; i++) {
+        struct hashed_entry *e = seen[i];
+        assert(dshmap_iter_next_after_hash(&map, e, e->hash) == seen[i + 1]);
+    }
+    struct hashed_entry *last = seen[count - 1];
+    assert(dshmap_iter_next_after_hash(&map, last, last->hash) == NULL);
+
+    struct hashed_entry missing = { .key = 99, .hash = 0x100 };
+    assert(dshmap_iter_next_after_hash(&map, &missing, missing.hash) == NULL);
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_swiss_iter_next_after_hash(void)
+{
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+
+    assert(dshmap_iter_next_after_hash(&map, NULL, 0) == NULL);
+    assert(dshmap_iter_next_after_hash(&map, (void *)1, 1) == NULL);
+
+    test_force_swiss(&map, 96);
+    assert(!map.small);
+
+    struct hashed_entry entries[48];
+    for (size_t i = 0; i < 48; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = (dshmap_hash_t)(0x4000 + (i % 24) * 0x80);
+        dshmap_insert(&map, &entries[i], entries[i].hash);
+    }
+
+    dshmap_remove(&map, &entries[7], entries[7].hash);
+    dshmap_remove(&map, &entries[31], entries[31].hash);
+
+    void *seen[48];
+    size_t count = 0;
+    dshmap_iter iter;
+    dshmap_iter_init(&iter, &map);
+    for (void *entry = dshmap_iter_next(&map, &iter);
+         entry;
+         entry = dshmap_iter_next(&map, &iter)) {
+        assert(count < 48);
+        seen[count++] = entry;
+    }
+    assert(count == 46);
+
+    for (size_t i = 0; i + 1 < count; i++) {
+        struct hashed_entry *e = seen[i];
+        assert(dshmap_iter_next_after_hash(&map, e, e->hash) == seen[i + 1]);
+    }
+    struct hashed_entry *last = seen[count - 1];
+    assert(dshmap_iter_next_after_hash(&map, last, last->hash) == NULL);
+
+    struct hashed_entry missing = { .key = 99, .hash = 0x4000 };
+    assert(dshmap_iter_next_after_hash(&map, &missing, missing.hash) == NULL);
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_safe_iteration_removes_small_chain(void)
 {
     if (DSHMAP_SMALL_THRESHOLD < 8) {
@@ -2620,6 +2716,8 @@ main(void)
     RUN_TEST(test_for_each_shard_evaluates_args_once);
     RUN_TEST(test_hash_iterator_api);
     RUN_TEST(test_swiss_iter_next_after);
+    RUN_TEST(test_small_iter_next_after_hash);
+    RUN_TEST(test_swiss_iter_next_after_hash);
     RUN_TEST(test_safe_iteration_removes_small_chain);
     RUN_TEST(test_safe_iteration_removes_swiss_table);
     RUN_TEST(test_find_empty);

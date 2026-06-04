@@ -601,6 +601,20 @@ dshmap_iter_shard_next(const dshmap *map, dshmap_iter *iter);
 static inline void *
 dshmap_iter_next_after(const dshmap *map, const void *entry);
 
+/* dshmap_iter_next_after_hash - Return the entry after another entry.
+ *
+ * entry must be non-NULL and currently present in map. hash must be the
+ * entry's full hash. This is for wrappers that keep only an entry pointer
+ * but can cheaply get its hash. It uses the hash to find entry, then returns
+ * the next entry in normal all-entry iteration order.
+ *
+ * Prefer dshmap_iter_next() for normal loops. Use this only when the API
+ * shape cannot keep iterator state between calls.
+ */
+static inline void *
+dshmap_iter_next_after_hash(const dshmap *map, const void *entry,
+                            dshmap_hash_t hash);
+
 /* DSHMAP_FOR_EACH - Iterate over all entries in the table.
  *
  * 'var' is declared as void * in the loop scope. Entries must be
@@ -1672,6 +1686,70 @@ dshmap_iter_next_after(const dshmap *map, const void *entry)
             if (map->slots[pos] == entry) {
                 found = true;
             }
+        }
+    }
+    return NULL;
+}
+
+static inline void *
+dshmap_iter_next_after_hash(const dshmap *map, const void *entry,
+                            dshmap_hash_t hash)
+{
+    if (entry == NULL || !dshmap__is_allocated(map)) {
+        return NULL;
+    }
+
+    if (dshmap__is_small(map)) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        size_t index = dshmap__small_buckets(map)[
+            dshmap__small_bucket_index(map, hash)];
+        while (index != DSHMAP__SMALL_END) {
+            if (nodes[index].hash == hash && nodes[index].entry == entry) {
+                size_t cap = dshmap__small_capacity(map);
+                for (size_t i = index + 1; i < cap; i++) {
+                    if (nodes[i].entry != NULL) {
+                        return nodes[i].entry;
+                    }
+                }
+                return NULL;
+            }
+            index = nodes[index].next;
+        }
+        return NULL;
+    }
+
+    uint8_t h2 = dshmap__h2(hash);
+    DSHMAP__FOR_EACH_GROUP(map, hash, group, ctrl) {
+        dshmap__ctrl_mask match = dshmap__ctrl_match(ctrl, h2);
+        while (match) {
+            size_t slot = dshmap__ctrl_next_match(&match);
+            size_t pos = dshmap__slot_pos(group, slot);
+            if ((map->hashes == NULL || map->hashes[pos] == hash) &&
+                map->slots[pos] == entry) {
+                dshmap__ctrl_mask occupied = dshmap__ctrl_occupied(ctrl);
+                while (occupied) {
+                    size_t next_slot = dshmap__ctrl_next_match(&occupied);
+                    if (next_slot > slot) {
+                        return map->slots[dshmap__slot_pos(group, next_slot)];
+                    }
+                }
+
+                for (size_t next_group = group + 1;
+                     next_group <= map->group_mask;
+                     next_group++) {
+                    occupied = dshmap__ctrl_occupied(
+                        dshmap__load_ctrl(map, next_group));
+                    if (occupied) {
+                        return map->slots[dshmap__slot_pos(
+                            next_group, dshmap__ctrl_next_match(&occupied))];
+                    }
+                }
+                return NULL;
+            }
+        }
+
+        if (dshmap__group_has_empty(ctrl)) {
+            return NULL;
         }
     }
     return NULL;

@@ -79,6 +79,7 @@ Full documentation is in `dshmap.h`.
 | `dshmap_iter_shard_init` | Initialize a read-only shard iterator |
 | `dshmap_iter_shard_next` | Return the next entry from a shard iterator |
 | `dshmap_iter_next_after` | Return the entry after a currently present entry |
+| `dshmap_iter_next_after_hash` | Return the entry after a currently present entry using its hash |
 | `DSHMAP_FOR_EACH` | Iterate all entries |
 | `DSHMAP_FOR_EACH_SAFE` | Iterate all entries while removing the current entry |
 | `DSHMAP_FOR_EACH_WITH_HASH` | Iterate entries with a matching full hash |
@@ -175,6 +176,14 @@ DSHMAP_FOR_EACH_SAFE(entry, next, &map) {
 
 The safe macro is only for removing the current entry. Do not insert entries,
 clear the table, or remove other entries during that loop.
+
+Use `dshmap_iter_next_after_hash()` only when an existing API cannot keep
+iterator state between calls, but it can pass the current entry and its full
+hash. Normal loops should use `dshmap_iter_next()` instead:
+
+```c
+entry = dshmap_iter_next_after_hash(&map, entry, entry_hash(entry));
+```
 
 For manual control, use `dshmap_iter`:
 
