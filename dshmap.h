@@ -239,9 +239,9 @@ typedef bool (*dshmap_key_eq_fn)(const void *entry, const void *key);
  * full hashes.
  * Promotion is one-way. A promoted table stays Swiss until destroy.
  *
- * The struct fields are visible so the type can be stack allocated, but
- * they are implementation details. Application code should not read or
- * write them directly.
+ * The struct definition is exposed so the type can be stack allocated.
+ * Its fields are implementation details. Application code should not read
+ * or write them directly.
  *
  * dshmap has no internal locking. Use external locking if any thread may
  * mutate the table while another thread can access it.
@@ -277,12 +277,12 @@ typedef struct dshmap {
 
 /* dshmap_iter - Cursor for iterating entries.
  *
- * The fields are public so the type can be stack allocated, but callers
- * should not read or write them directly. Initialize with
- * dshmap_iter_init() for all entries, dshmap_iter_hash_init() for entries
- * with one full hash, or dshmap_iter_shard_init() for one read-only shard.
- * Then call the matching next function until it returns NULL. Iteration order
- * is arbitrary and may change after inserts or removes.
+ * The struct definition is exposed so iterators can be stack allocated.
+ * Its fields are implementation details. Initialize with dshmap_iter_init()
+ * for all entries, dshmap_iter_hash_init() for entries with one full hash,
+ * or dshmap_iter_shard_init() for one read-only shard. Then call the matching
+ * next function until it returns NULL. Iteration order is arbitrary and may
+ * change after inserts or removes.
  */
 typedef struct dshmap_iter {
     dshmap_hash_t hash;
