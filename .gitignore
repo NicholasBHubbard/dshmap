@@ -4,6 +4,7 @@ tests/test-small-threshold
 tests/test-small-threshold-asan
 tests/test-oom
 tests/test-oom-asan
+tests/test-cxx
 tests/test-cov
 tests/*.gcno
 tests/*.gcda
