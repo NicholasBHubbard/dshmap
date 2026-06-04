@@ -24,9 +24,8 @@
 #define DSHMAP_DISABLE_SIMD 0
 #endif
 
-#if !DSHMAP_DISABLE_SIMD && defined(__SSE2__) && \
-    (defined(__AVX2__) || defined(__clang__))
-#include <emmintrin.h>
+#if !DSHMAP_DISABLE_SIMD && defined(__AVX2__)
+#include <immintrin.h>
 #define DSHMAP__BACKEND_X86 1
 #elif !DSHMAP_DISABLE_SIMD && \
       (defined(__ARM_NEON) || defined(__ARM_NEON__))
@@ -128,13 +127,12 @@ extern "C" {
  * benchmarks:
  *
  * - x86 SIMD on AVX2 compiler targets
- * - x86 SIMD on Clang SSE2 targets
  * - NEON on ARM targets
  * - SWAR otherwise
  *
- * GCC x86 builds without AVX2 use SWAR by default because the generic SSE2
- * path was slower for successful key lookups in profiling. Define this as 1
- * before including dshmap.h to disable SIMD and force the SWAR fallback.
+ * x86 builds without AVX2 use SWAR by default because the generic SSE2 path
+ * was slower for successful key lookups in profiling. Define this as 1 before
+ * including dshmap.h to disable SIMD and force the SWAR fallback.
  *
  *     #define DSHMAP_DISABLE_SIMD 1
  *     #include "dshmap.h"
@@ -280,6 +278,7 @@ typedef struct dshmap {
  * The struct definition is exposed so iterators can be stack allocated.
  * Its fields are implementation details. Initialize with dshmap_iter_init()
  * for all entries, dshmap_iter_hash_init() for entries with one full hash,
+ * dshmap_iter_hash_candidate_init() for entries that may have one full hash,
  * or dshmap_iter_shard_init() for one read-only shard. Then call the matching
  * next function until it returns NULL. Iteration order is arbitrary and may
  * change after inserts or removes.
@@ -444,6 +443,38 @@ dshmap_find(const dshmap *map, dshmap_hash_t hash);
 static inline void *
 dshmap_find_next(const dshmap *map, dshmap_hash_t hash, const void *prev);
 
+/* dshmap_find_with_hash_fn - Look up by hash with a caller hash function.
+ *
+ * Same as dshmap_find(), but when Swiss full hashes are not stored it calls
+ * hash_fn(entry) to check a candidate's full hash instead of map->hash_fn.
+ * This is useful for wrappers whose entries already store their full hash.
+ *
+ * hash_fn must return the same full hash that was used when the entry was
+ * inserted. Pass NULL to use map->hash_fn.
+ *
+ *     void *obj = dshmap_find_with_hash_fn(&map, hash, entry_hash);
+ */
+static inline void *
+dshmap_find_with_hash_fn(const dshmap *map, dshmap_hash_t hash,
+                         dshmap_hash_fn hash_fn);
+
+/* dshmap_find_next_with_hash_fn - Continue a caller-hash lookup.
+ *
+ * Same as dshmap_find_next(), but uses hash_fn for candidate full-hash checks
+ * when Swiss full hashes are not stored. 'prev' must be a pointer previously
+ * returned by dshmap_find_with_hash_fn() or dshmap_find_next_with_hash_fn()
+ * for the same hash.
+ *
+ *     for (void *e = dshmap_find_with_hash_fn(&map, h, entry_hash);
+ *          e;
+ *          e = dshmap_find_next_with_hash_fn(&map, h, e, entry_hash)) {
+ *         process(e);
+ *     }
+ */
+static inline void *
+dshmap_find_next_with_hash_fn(const dshmap *map, dshmap_hash_t hash,
+                              const void *prev, dshmap_hash_fn hash_fn);
+
 /* dshmap_find_key - Look up an entry by hash and key equality.
  *
  * Returns the first entry whose hash matches and for which eq_fn(entry,
@@ -523,6 +554,23 @@ static inline void
 dshmap_iter_hash_init(dshmap_iter *iter, const dshmap *map,
                       dshmap_hash_t hash);
 
+/* dshmap_iter_hash_candidate_init - Initialize a hash-candidate iterator.
+ *
+ * Sets up iter to visit entries that may have the full hash 'hash'. The
+ * caller must check each returned entry's full hash before treating it as
+ * a match. This is useful for wrappers whose entries already store their
+ * hash, because dshmap_iter_hash_candidate_next() does not call map->hash_fn.
+ *
+ * In small mode this visits entries in the matching small bucket. In Swiss
+ * mode this visits entries with the matching H2 tag.
+ *
+ *     dshmap_iter iter;
+ *     dshmap_iter_hash_candidate_init(&iter, &map, hash);
+ */
+static inline void
+dshmap_iter_hash_candidate_init(dshmap_iter *iter, const dshmap *map,
+                                dshmap_hash_t hash);
+
 /* dshmap_iter_shard_init - Initialize a read-only shard iterator.
  *
  * Sets up iter to visit the entries in one shard of map. shard_count must be
@@ -574,6 +622,53 @@ dshmap_iter_next(const dshmap *map, dshmap_iter *iter);
  */
 static inline void *
 dshmap_iter_hash_next(const dshmap *map, dshmap_iter *iter);
+
+/* dshmap_iter_hash_next_with_hash_fn - Return the next exact hash match.
+ *
+ * Same as dshmap_iter_hash_next(), but when Swiss full hashes are not stored
+ * it calls hash_fn(entry) to check each candidate's full hash instead of
+ * map->hash_fn. This is useful for wrappers whose entries already store their
+ * full hash.
+ *
+ * hash_fn must return the same full hash that was used when the entry was
+ * inserted. Pass NULL to use map->hash_fn.
+ *
+ *     dshmap_iter iter;
+ *     dshmap_iter_hash_init(&iter, &map, hash);
+ *     for (void *entry = dshmap_iter_hash_next_with_hash_fn(&map, &iter,
+ *                                                           entry_hash);
+ *          entry;
+ *          entry = dshmap_iter_hash_next_with_hash_fn(&map, &iter,
+ *                                                     entry_hash)) {
+ *         process(entry);
+ *     }
+ */
+static inline void *
+dshmap_iter_hash_next_with_hash_fn(const dshmap *map, dshmap_iter *iter,
+                                   dshmap_hash_fn hash_fn);
+
+/* dshmap_iter_hash_candidate_next - Return the next hash candidate.
+ *
+ * Returns NULL when there are no more candidates for the hash passed to
+ * dshmap_iter_hash_candidate_init(). Returned entries may have a different
+ * full hash; the caller must check. Do not insert or remove entries while
+ * using this iterator.
+ *
+ * This function does not call map->hash_fn. It only uses hashes already stored
+ * by the table layout and the Swiss control-byte tag.
+ *
+ *     dshmap_iter iter;
+ *     dshmap_iter_hash_candidate_init(&iter, &map, hash);
+ *     for (void *entry = dshmap_iter_hash_candidate_next(&map, &iter);
+ *          entry;
+ *          entry = dshmap_iter_hash_candidate_next(&map, &iter)) {
+ *         if (entry_hash(entry) == hash) {
+ *             process(entry);
+ *         }
+ *     }
+ */
+static inline void *
+dshmap_iter_hash_candidate_next(const dshmap *map, dshmap_iter *iter);
 
 /* dshmap_iter_shard_next - Return the next entry from a shard iterator.
  *
@@ -1059,6 +1154,16 @@ dshmap__slot_hash(const dshmap *map, size_t pos)
     return map->hash_fn(map->slots[pos]);
 }
 
+static inline dshmap_hash_t
+dshmap__slot_hash_with_hash_fn(const dshmap *map, size_t pos,
+                               dshmap_hash_fn hash_fn)
+{
+    if (map->hashes != NULL) {
+        return map->hashes[pos];
+    }
+    return hash_fn(map->slots[pos]);
+}
+
 static inline void
 dshmap__set_slot_hash(dshmap *map, size_t pos, dshmap_hash_t hash)
 {
@@ -1504,6 +1609,13 @@ dshmap_iter_hash_init(dshmap_iter *iter, const dshmap *map,
 }
 
 static inline void
+dshmap_iter_hash_candidate_init(dshmap_iter *iter, const dshmap *map,
+                                dshmap_hash_t hash)
+{
+    dshmap_iter_hash_init(iter, map, hash);
+}
+
+static inline void
 dshmap_iter_shard_init(dshmap_iter *iter, const dshmap *map,
                        size_t shard, size_t shard_count)
 {
@@ -1589,6 +1701,103 @@ dshmap_iter_hash_next(const dshmap *map, dshmap_iter *iter)
                 return map->slots[pos];
             }
             continue;
+        }
+
+        if (iter->probe > map->group_mask) {
+            return NULL;
+        }
+
+        size_t group = iter->group;
+        dshmap__ctrl_group ctrl = dshmap__load_ctrl(map, group);
+        iter->match_group = group;
+        iter->occupied = dshmap__ctrl_match(ctrl, h2);
+        if (dshmap__group_has_empty(ctrl)) {
+            iter->probe = map->group_mask + 1;
+        } else {
+            iter->group = dshmap__next_group_index(map, group, iter->probe);
+            iter->probe++;
+        }
+    }
+}
+
+static inline void *
+dshmap_iter_hash_next_with_hash_fn(const dshmap *map, dshmap_iter *iter,
+                                   dshmap_hash_fn hash_fn)
+{
+    if (!dshmap__is_allocated(map)) {
+        return NULL;
+    }
+
+    if (dshmap__is_small(map)) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        while (iter->group != DSHMAP__SMALL_END) {
+            size_t index = iter->group;
+            iter->group = nodes[index].next;
+            if (nodes[index].hash == iter->hash) {
+                return nodes[index].entry;
+            }
+        }
+        return NULL;
+    }
+
+    if (hash_fn == NULL) {
+        hash_fn = map->hash_fn;
+    }
+
+    uint8_t h2 = dshmap__h2(iter->hash);
+    for (;;) {
+        if (iter->occupied) {
+            size_t pos = dshmap__slot_pos(
+                iter->match_group,
+                dshmap__ctrl_next_match(&iter->occupied));
+            if (dshmap__slot_hash_with_hash_fn(map, pos, hash_fn) ==
+                iter->hash) {
+                return map->slots[pos];
+            }
+            continue;
+        }
+
+        if (iter->probe > map->group_mask) {
+            return NULL;
+        }
+
+        size_t group = iter->group;
+        dshmap__ctrl_group ctrl = dshmap__load_ctrl(map, group);
+        iter->match_group = group;
+        iter->occupied = dshmap__ctrl_match(ctrl, h2);
+        if (dshmap__group_has_empty(ctrl)) {
+            iter->probe = map->group_mask + 1;
+        } else {
+            iter->group = dshmap__next_group_index(map, group, iter->probe);
+            iter->probe++;
+        }
+    }
+}
+
+static inline void *
+dshmap_iter_hash_candidate_next(const dshmap *map, dshmap_iter *iter)
+{
+    if (!dshmap__is_allocated(map)) {
+        return NULL;
+    }
+
+    if (dshmap__is_small(map)) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        while (iter->group != DSHMAP__SMALL_END) {
+            size_t index = iter->group;
+            iter->group = nodes[index].next;
+            return nodes[index].entry;
+        }
+        return NULL;
+    }
+
+    uint8_t h2 = dshmap__h2(iter->hash);
+    for (;;) {
+        if (iter->occupied) {
+            size_t pos = dshmap__slot_pos(
+                iter->match_group,
+                dshmap__ctrl_next_match(&iter->occupied));
+            return map->slots[pos];
         }
 
         if (iter->probe > map->group_mask) {
@@ -1855,6 +2064,98 @@ dshmap_find_next(const dshmap *map, dshmap_hash_t hash, const void *prev)
                     continue;
                 }
                 if (dshmap__slot_hash(map, pos) == hash) {
+                    return map->slots[pos];
+                }
+            }
+
+            if (dshmap__group_has_empty(ctrl)) {
+                return NULL;
+            }
+        }
+        return NULL;
+    }
+}
+
+static inline void *
+dshmap_find_with_hash_fn(const dshmap *map, dshmap_hash_t hash,
+                         dshmap_hash_fn hash_fn)
+{
+    if (dshmap__is_small(map)) {
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        size_t index = dshmap__small_buckets(map)[
+            dshmap__small_bucket_index(map, hash)];
+        while (index != DSHMAP__SMALL_END) {
+            if (nodes[index].hash == hash) {
+                return nodes[index].entry;
+            }
+            index = nodes[index].next;
+        }
+        return NULL;
+    } else {
+        if (hash_fn == NULL) {
+            hash_fn = map->hash_fn;
+        }
+
+        uint8_t h2 = dshmap__h2(hash);
+        DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
+            dshmap__ctrl_mask match = dshmap__ctrl_match(ctrl, h2);
+            while (match) {
+                size_t pos = dshmap__slot_pos(index,
+                                              dshmap__ctrl_next_match(&match));
+                if (dshmap__slot_hash_with_hash_fn(map, pos, hash_fn) ==
+                    hash) {
+                    return map->slots[pos];
+                }
+            }
+
+            if (dshmap__group_has_empty(ctrl)) {
+                return NULL;
+            }
+        }
+        return NULL;
+    }
+}
+
+static inline void *
+dshmap_find_next_with_hash_fn(const dshmap *map, dshmap_hash_t hash,
+                              const void *prev, dshmap_hash_fn hash_fn)
+{
+    if (dshmap__is_small(map)) {
+        bool found_prev = false;
+        dshmap__small_node *nodes = dshmap__small_nodes(map);
+        size_t index = dshmap__small_buckets(map)[
+            dshmap__small_bucket_index(map, hash)];
+        while (index != DSHMAP__SMALL_END) {
+            if (!found_prev) {
+                if (nodes[index].entry == prev) {
+                    found_prev = true;
+                }
+            } else if (nodes[index].hash == hash) {
+                return nodes[index].entry;
+            }
+            index = nodes[index].next;
+        }
+        return NULL;
+    } else {
+        if (hash_fn == NULL) {
+            hash_fn = map->hash_fn;
+        }
+
+        uint8_t h2 = dshmap__h2(hash);
+        bool found_prev = false;
+        DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
+            dshmap__ctrl_mask match = dshmap__ctrl_match(ctrl, h2);
+            while (match) {
+                size_t pos = dshmap__slot_pos(index,
+                                              dshmap__ctrl_next_match(&match));
+                if (!found_prev) {
+                    if (map->slots[pos] == prev) {
+                        found_prev = true;
+                    }
+                    continue;
+                }
+                if (dshmap__slot_hash_with_hash_fn(map, pos, hash_fn) ==
+                    hash) {
                     return map->slots[pos];
                 }
             }

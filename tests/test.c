@@ -19,8 +19,8 @@
 #error "AVX2 x86 targets must use the x86 SIMD control backend"
 #endif
 #if !DSHMAP_DISABLE_SIMD && defined(__clang__) && defined(__SSE2__) && \
-    !DSHMAP__BACKEND_X86
-#error "Clang x86 targets must use the x86 SIMD control backend"
+    !defined(__AVX2__) && !DSHMAP__BACKEND_SWAR
+#error "Clang x86 without AVX2 must default to the SWAR control backend"
 #endif
 #if (DSHMAP__BACKEND_X86 || DSHMAP__BACKEND_NEON) && DSHMAP__GROUP_WIDTH != 16
 #error "SIMD control backends must use 16-slot groups"
@@ -189,6 +189,7 @@ enum {
 };
 
 static size_t counted_hash_calls;
+static size_t supplied_hash_calls;
 static size_t macro_hash_calls;
 static size_t macro_map_calls;
 static size_t macro_shard_calls;
@@ -208,6 +209,14 @@ counted_entry_hash(const void *entry)
 {
     const struct counted_entry *e = entry;
     counted_hash_calls++;
+    return e->hash;
+}
+
+static dshmap_hash_t
+supplied_counted_entry_hash(const void *entry)
+{
+    const struct counted_entry *e = entry;
+    supplied_hash_calls++;
     return e->hash;
 }
 
@@ -1992,6 +2001,231 @@ test_hash_iterator_api(void)
 }
 
 static void
+test_hash_candidate_iterator_small_table(void)
+{
+    if (DSHMAP_SMALL_THRESHOLD < 8) {
+        return;
+    }
+
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+    dshmap_reserve(&map, 8);
+
+    dshmap_hash_t target_hash = 0x11;
+    struct hashed_entry a = { .key = 1, .hash = target_hash };
+    struct hashed_entry b = { .key = 2, .hash = target_hash };
+    struct hashed_entry noise1 = { .key = 3, .hash = 0x19 };
+    struct hashed_entry noise2 = { .key = 4, .hash = 0x21 };
+
+    dshmap_insert(&map, &noise1, noise1.hash);
+    dshmap_insert(&map, &a, a.hash);
+    dshmap_insert(&map, &noise2, noise2.hash);
+    dshmap_insert(&map, &b, b.hash);
+    assert(map.small);
+
+    dshmap_iter iter;
+    dshmap_iter_hash_candidate_init(&iter, &map, target_hash);
+
+    bool found_a = false, found_b = false, found_noise = false;
+    size_t exact_count = 0;
+    size_t candidate_count = 0;
+    for (void *entry = dshmap_iter_hash_candidate_next(&map, &iter);
+         entry;
+         entry = dshmap_iter_hash_candidate_next(&map, &iter)) {
+        struct hashed_entry *e = entry;
+        candidate_count++;
+        if (e->hash == target_hash) {
+            exact_count++;
+            if (e == &a) found_a = true;
+            else if (e == &b) found_b = true;
+            else assert(0 && "candidate iterator returned wrong exact hash");
+        } else {
+            found_noise = true;
+        }
+    }
+
+    assert(candidate_count == 4);
+    assert(exact_count == 2);
+    assert(found_a && found_b && found_noise);
+    assert(dshmap_iter_hash_candidate_next(&map, &iter) == NULL);
+
+    dshmap_iter_hash_candidate_init(&iter, &map, 0x12);
+    assert(dshmap_iter_hash_candidate_next(&map, &iter) == NULL);
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_hash_candidate_iterator_swiss_table(void)
+{
+    dshmap map;
+    dshmap_init(&map, counted_entry_hash);
+    test_force_swiss(&map, 32);
+
+    size_t groups = map.group_mask + 1;
+    dshmap_hash_t target_hash = 0x2A;
+    struct counted_entry a = { .key = 1, .hash = target_hash };
+    struct counted_entry b = { .key = 2, .hash = target_hash };
+    struct counted_entry noise1 = {
+        .key = 3,
+        .hash = ((dshmap_hash_t)groups << 7) | dshmap__h2(target_hash),
+    };
+    struct counted_entry noise2 = {
+        .key = 4,
+        .hash = ((dshmap_hash_t)(groups * 2) << 7) | dshmap__h2(target_hash),
+    };
+
+    dshmap_insert(&map, &noise1, noise1.hash);
+    dshmap_insert(&map, &a, a.hash);
+    dshmap_insert(&map, &noise2, noise2.hash);
+    dshmap_insert(&map, &b, b.hash);
+    assert(!map.small);
+
+    counted_hash_calls = 0;
+
+    dshmap_iter iter;
+    dshmap_iter_hash_candidate_init(&iter, &map, target_hash);
+
+    bool found_a = false, found_b = false, found_noise1 = false;
+    bool found_noise2 = false;
+    size_t exact_count = 0;
+    size_t candidate_count = 0;
+    for (void *entry = dshmap_iter_hash_candidate_next(&map, &iter);
+         entry;
+         entry = dshmap_iter_hash_candidate_next(&map, &iter)) {
+        struct counted_entry *e = entry;
+        candidate_count++;
+        if (e->hash == target_hash) {
+            exact_count++;
+            if (e == &a) found_a = true;
+            else if (e == &b) found_b = true;
+            else assert(0 && "candidate iterator returned wrong exact hash");
+        } else if (e == &noise1) {
+            found_noise1 = true;
+        } else if (e == &noise2) {
+            found_noise2 = true;
+        } else {
+            assert(0 && "candidate iterator returned wrong noise");
+        }
+    }
+
+    assert(candidate_count == 4);
+    assert(exact_count == 2);
+    assert(found_a && found_b && found_noise1 && found_noise2);
+    assert(counted_hash_calls == 0);
+
+    dshmap_iter_hash_candidate_init(&iter, &map, 0x1234);
+    assert(dshmap_iter_hash_candidate_next(&map, &iter) == NULL);
+    assert(counted_hash_calls == 0);
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_find_with_hash_fn_uses_supplied_hash(void)
+{
+    dshmap map;
+    dshmap_init(&map, counted_entry_hash);
+    test_force_swiss(&map, 32);
+
+    size_t groups = map.group_mask + 1;
+    dshmap_hash_t target_hash = 0x2A;
+    struct counted_entry a = { .key = 1, .hash = target_hash };
+    struct counted_entry b = { .key = 2, .hash = target_hash };
+    struct counted_entry noise1 = {
+        .key = 3,
+        .hash = ((dshmap_hash_t)groups << 7) | dshmap__h2(target_hash),
+    };
+    struct counted_entry noise2 = {
+        .key = 4,
+        .hash = ((dshmap_hash_t)(groups * 2) << 7) | dshmap__h2(target_hash),
+    };
+
+    dshmap_insert(&map, &noise1, noise1.hash);
+    dshmap_insert(&map, &a, a.hash);
+    dshmap_insert(&map, &noise2, noise2.hash);
+    dshmap_insert(&map, &b, b.hash);
+
+    counted_hash_calls = 0;
+    supplied_hash_calls = 0;
+
+    void *first = dshmap_find_with_hash_fn(&map, target_hash,
+                                           supplied_counted_entry_hash);
+    void *second = dshmap_find_next_with_hash_fn(
+        &map, target_hash, first, supplied_counted_entry_hash);
+    void *third = dshmap_find_next_with_hash_fn(
+        &map, target_hash, second, supplied_counted_entry_hash);
+
+    assert((first == &a && second == &b) ||
+           (first == &b && second == &a));
+    assert(third == NULL);
+    assert(counted_hash_calls == 0);
+#if DSHMAP_SWISS_STORE_HASHES
+    assert(supplied_hash_calls == 0);
+#else
+    assert(supplied_hash_calls > 0);
+#endif
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_hash_iterator_with_hash_fn_uses_supplied_hash(void)
+{
+    dshmap map;
+    dshmap_init(&map, counted_entry_hash);
+    test_force_swiss(&map, 32);
+
+    size_t groups = map.group_mask + 1;
+    dshmap_hash_t target_hash = 0x55;
+    struct counted_entry a = { .key = 1, .hash = target_hash };
+    struct counted_entry b = { .key = 2, .hash = target_hash };
+    struct counted_entry noise1 = {
+        .key = 3,
+        .hash = ((dshmap_hash_t)groups << 7) | dshmap__h2(target_hash),
+    };
+    struct counted_entry noise2 = {
+        .key = 4,
+        .hash = ((dshmap_hash_t)(groups * 2) << 7) | dshmap__h2(target_hash),
+    };
+
+    dshmap_insert(&map, &noise1, noise1.hash);
+    dshmap_insert(&map, &a, a.hash);
+    dshmap_insert(&map, &noise2, noise2.hash);
+    dshmap_insert(&map, &b, b.hash);
+
+    counted_hash_calls = 0;
+    supplied_hash_calls = 0;
+
+    dshmap_iter iter;
+    dshmap_iter_hash_init(&iter, &map, target_hash);
+
+    bool found_a = false, found_b = false;
+    size_t count = 0;
+    for (void *entry = dshmap_iter_hash_next_with_hash_fn(
+             &map, &iter, supplied_counted_entry_hash);
+         entry;
+         entry = dshmap_iter_hash_next_with_hash_fn(
+             &map, &iter, supplied_counted_entry_hash)) {
+        count++;
+        if (entry == &a) found_a = true;
+        else if (entry == &b) found_b = true;
+        else assert(0 && "hash-fn iterator returned same-H2 noise");
+    }
+
+    assert(count == 2);
+    assert(found_a && found_b);
+    assert(counted_hash_calls == 0);
+#if DSHMAP_SWISS_STORE_HASHES
+    assert(supplied_hash_calls == 0);
+#else
+    assert(supplied_hash_calls > 0);
+#endif
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_swiss_iter_next_after(void)
 {
     dshmap map;
@@ -2715,6 +2949,10 @@ main(void)
     RUN_TEST(test_shard_iteration_swiss_table);
     RUN_TEST(test_for_each_shard_evaluates_args_once);
     RUN_TEST(test_hash_iterator_api);
+    RUN_TEST(test_hash_candidate_iterator_small_table);
+    RUN_TEST(test_hash_candidate_iterator_swiss_table);
+    RUN_TEST(test_find_with_hash_fn_uses_supplied_hash);
+    RUN_TEST(test_hash_iterator_with_hash_fn_uses_supplied_hash);
     RUN_TEST(test_swiss_iter_next_after);
     RUN_TEST(test_small_iter_next_after_hash);
     RUN_TEST(test_swiss_iter_next_after_hash);

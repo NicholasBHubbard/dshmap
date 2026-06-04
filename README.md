@@ -7,7 +7,7 @@ dshmap is a header only C99 Swiss-style hash map with a small-table fast path.
 - **Hybrid layout**: small tables use pooled separate chaining, then promote to the Swiss-table layout after `DSHMAP_SMALL_THRESHOLD` entries
 - **Scale-oriented**: flat layouts reduce pointer chasing and cache misses; the largest Swiss-table wins show up on large tables, especially misses, iteration, and memory use ([see benchmarks](#benchmarks))
 - **Cache-friendly**: small mode keeps bucket heads and nodes in one allocation; Swiss mode uses contiguous control bytes and slots
-- **SIMD/SWAR control matching**: uses x86 SIMD on AVX2 targets and Clang SSE2 targets, NEON on ARM, and SWAR otherwise
+- **SIMD/SWAR control matching**: uses x86 SIMD on AVX2 targets, NEON on ARM, and SWAR otherwise
 - **Configurable Swiss hash storage**: store full hashes per Swiss slot when hash functions are expensive, or omit them to reduce memory use
 - **Public iterators**: cursor-based iteration plus safe remove-current iteration
 - **Header-only**: single file, no build system integration, no dependencies beyond the C standard library
@@ -69,6 +69,8 @@ Full documentation is in `dshmap.h`.
 | `dshmap_insert` | Insert a non-`NULL` entry; inserting the same entry pointer twice without removing it first is unsupported |
 | `dshmap_find` | Look up by hash; use `dshmap_find_key` when key equality matters |
 | `dshmap_find_next` | Continue a lookup through distinct entries with the same hash |
+| `dshmap_find_with_hash_fn` | Look up by hash using a caller-supplied hash accessor |
+| `dshmap_find_next_with_hash_fn` | Continue a caller-hash lookup |
 | `dshmap_find_key` | Look up by hash and key equality; key-aware form of `dshmap_find` |
 | `dshmap_find_key_next` | Continue a key-aware lookup through duplicate logical keys |
 | `dshmap_remove` | Remove an entry by pointer |
@@ -76,6 +78,9 @@ Full documentation is in `dshmap.h`.
 | `dshmap_iter_next` | Return the next entry from an iterator |
 | `dshmap_iter_hash_init` | Initialize an iterator for one full hash |
 | `dshmap_iter_hash_next` | Return the next entry from a hash iterator |
+| `dshmap_iter_hash_next_with_hash_fn` | Return the next hash match using a caller-supplied hash accessor |
+| `dshmap_iter_hash_candidate_init` | Initialize an iterator for possible matches to one full hash |
+| `dshmap_iter_hash_candidate_next` | Return the next hash candidate without calling the map hash function |
 | `dshmap_iter_shard_init` | Initialize a read-only shard iterator |
 | `dshmap_iter_shard_next` | Return the next entry from a shard iterator |
 | `dshmap_iter_next_after` | Return the entry after a currently present entry |
@@ -118,14 +123,13 @@ Swiss control-byte matching uses the fastest simple backend found in local
 benchmarks:
 
 - x86 SIMD on AVX2 compiler targets
-- x86 SIMD on Clang SSE2 targets
 - NEON on ARM targets
 - SWAR otherwise
 
-GCC x86 builds without AVX2 use SWAR by default because the generic SSE2 path
-was slower for successful key lookups in profiling. Compile GCC with `-mavx2`
-or `-march=native` if you want the x86 SIMD backend where supported. To force
-the fallback, define `DSHMAP_DISABLE_SIMD` before including `dshmap.h`:
+x86 builds without AVX2 use SWAR by default because the generic SSE2 path was
+slower for successful key lookups in profiling. Compile with `-mavx2` or
+`-march=native` if you want the x86 SIMD backend where supported. To force the
+fallback, define `DSHMAP_DISABLE_SIMD` before including `dshmap.h`:
 
 ```c
 #define DSHMAP_DISABLE_SIMD 1
@@ -207,6 +211,38 @@ for (void *entry = dshmap_iter_hash_next(&map, &iter);
      entry;
      entry = dshmap_iter_hash_next(&map, &iter)) {
     process(entry);
+}
+```
+
+If your entries already store their full hash, use the `_with_hash_fn`
+functions to avoid calling the table's normal hash function while checking
+Swiss candidates:
+
+```c
+void *entry = dshmap_find_with_hash_fn(&map, hash, entry_hash);
+
+dshmap_iter iter;
+dshmap_iter_hash_init(&iter, &map, hash);
+for (void *entry = dshmap_iter_hash_next_with_hash_fn(&map, &iter, entry_hash);
+     entry;
+     entry = dshmap_iter_hash_next_with_hash_fn(&map, &iter, entry_hash)) {
+    process(entry);
+}
+```
+
+If your entries already store their full hash, use the candidate iterator to
+avoid calling the table's hash function while scanning possible matches. It may
+return entries with a different full hash, so check the hash yourself:
+
+```c
+dshmap_iter iter;
+dshmap_iter_hash_candidate_init(&iter, &map, hash);
+for (void *entry = dshmap_iter_hash_candidate_next(&map, &iter);
+     entry;
+     entry = dshmap_iter_hash_candidate_next(&map, &iter)) {
+    if (entry_hash(entry) == hash) {
+        process(entry);
+    }
 }
 ```
 
