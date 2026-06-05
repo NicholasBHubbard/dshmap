@@ -46,7 +46,6 @@ test-config-matrix: tests/test.c dshmap.h
 	    "small_disabled:-DDSHMAP_SMALL_THRESHOLD=0" \
 	    "tiny_small:-DDSHMAP_SMALL_THRESHOLD=1" \
 	    "odd_small:-DDSHMAP_SMALL_THRESHOLD=3" \
-	    "legacy_dense_threshold:-DDSHMAP_DENSE_THRESHOLD=16" \
 	    "swar_fallback:-DDSHMAP_DISABLE_SIMD=1" \
 	    "swar_small_disabled:-DDSHMAP_DISABLE_SIMD=1 -DDSHMAP_SMALL_THRESHOLD=0" \
 	    "low_load:-DDSHMAP_LOAD_FACTOR_NUM=1 -DDSHMAP_LOAD_FACTOR_DEN=8" \

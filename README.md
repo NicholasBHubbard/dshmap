@@ -116,9 +116,6 @@ but avoids recomputing hashes during some lookups, removals, and resizes. It
 can help when hash functions are expensive or collision-heavy lookups are
 common.
 
-`DSHMAP_DENSE_THRESHOLD` is still accepted as an old name for
-`DSHMAP_SMALL_THRESHOLD`.
-
 Swiss control-byte matching uses the fastest simple backend found in local
 benchmarks:
 

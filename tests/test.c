@@ -4,6 +4,13 @@
 
 #include "../dshmap.h"
 
+#ifdef DSHMAP_DENSE_THRESHOLD
+#error "dshmap.h must not define legacy DSHMAP_DENSE_THRESHOLD"
+#endif
+#ifdef DSHMAP_DENSE_STORE_HASHES
+#error "dshmap.h must not define legacy DSHMAP_DENSE_STORE_HASHES"
+#endif
+
 #if DSHMAP_DISABLE_SIMD && !DSHMAP__BACKEND_SWAR
 #error "DSHMAP_DISABLE_SIMD must force the SWAR control backend"
 #endif

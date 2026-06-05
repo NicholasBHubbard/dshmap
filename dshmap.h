@@ -92,18 +92,9 @@ extern "C" {
  * this threshold, the table promotes to the Swiss layout. Reserve can
  * also promote the table. Promotion is one-way; clear does not move a
  * table back to small mode. Define as 0 to disable small mode.
- *
- * DSHMAP_DENSE_THRESHOLD is accepted as an old name for this setting.
  */
 #ifndef DSHMAP_SMALL_THRESHOLD
-#ifdef DSHMAP_DENSE_THRESHOLD
-#define DSHMAP_SMALL_THRESHOLD DSHMAP_DENSE_THRESHOLD
-#else
 #define DSHMAP_SMALL_THRESHOLD 2048
-#endif
-#endif
-#ifndef DSHMAP_DENSE_THRESHOLD
-#define DSHMAP_DENSE_THRESHOLD DSHMAP_SMALL_THRESHOLD
 #endif
 
 /* DSHMAP_SWISS_STORE_HASHES - Swiss hash storage.
@@ -111,12 +102,7 @@ extern "C" {
  * Define as 1 to store one full hash per Swiss slot, or 0 to recompute
  * hashes from entries when needed. Swiss mode does not store full hashes
  * by default. Small chained mode always stores full hashes in its nodes.
- *
- * DSHMAP_DENSE_STORE_HASHES is accepted as an old no-op setting.
  */
-#ifndef DSHMAP_DENSE_STORE_HASHES
-#define DSHMAP_DENSE_STORE_HASHES 1
-#endif
 #ifndef DSHMAP_SWISS_STORE_HASHES
 #define DSHMAP_SWISS_STORE_HASHES 0
 #endif
@@ -148,9 +134,6 @@ extern "C" {
 #endif
 #if DSHMAP_SMALL_THRESHOLD < 0
 #error "DSHMAP_SMALL_THRESHOLD must be >= 0"
-#endif
-#if DSHMAP_DENSE_STORE_HASHES != 0 && DSHMAP_DENSE_STORE_HASHES != 1
-#error "DSHMAP_DENSE_STORE_HASHES must be 0 or 1"
 #endif
 #if DSHMAP_SWISS_STORE_HASHES != 0 && DSHMAP_SWISS_STORE_HASHES != 1
 #error "DSHMAP_SWISS_STORE_HASHES must be 0 or 1"
