@@ -2047,6 +2047,26 @@ test_hash_iterator_api(void)
 }
 
 static void
+test_hash_iterators_empty_table(void)
+{
+    dshmap map;
+    dshmap_init(&map, counted_entry_hash);
+
+    dshmap_iter iter;
+    dshmap_iter_hash_init(&iter, &map, 0x1234);
+    assert(dshmap_iter_hash_next(&map, &iter) == NULL);
+
+    dshmap_iter_hash_init(&iter, &map, 0x1234);
+    assert(dshmap_iter_hash_next_with_hash_fn(
+        &map, &iter, supplied_counted_entry_hash) == NULL);
+
+    dshmap_iter_hash_candidate_init(&iter, &map, 0x1234);
+    assert(dshmap_iter_hash_candidate_next(&map, &iter) == NULL);
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_hash_candidate_iterator_small_table(void)
 {
     if (DSHMAP_SMALL_THRESHOLD < 8) {
@@ -2168,6 +2188,61 @@ test_hash_candidate_iterator_swiss_table(void)
 }
 
 static void
+test_with_hash_fn_small_table(void)
+{
+    if (DSHMAP_SMALL_THRESHOLD < 4) {
+        return;
+    }
+
+    dshmap map;
+    dshmap_init(&map, counted_entry_hash);
+
+    dshmap_hash_t target_hash = 0x42;
+    struct counted_entry a = { .key = 1, .hash = target_hash };
+    struct counted_entry b = { .key = 2, .hash = target_hash };
+    struct counted_entry c = { .key = 3, .hash = 0x43 };
+
+    dshmap_insert(&map, &c, c.hash);
+    dshmap_insert(&map, &a, a.hash);
+    dshmap_insert(&map, &b, b.hash);
+    assert(map.small);
+
+    counted_hash_calls = 0;
+    supplied_hash_calls = 0;
+
+    void *first = dshmap_find_with_hash_fn(
+        &map, target_hash, supplied_counted_entry_hash);
+    void *second = dshmap_find_next_with_hash_fn(
+        &map, target_hash, first, supplied_counted_entry_hash);
+    void *third = dshmap_find_next_with_hash_fn(
+        &map, target_hash, second, supplied_counted_entry_hash);
+
+    assert((first == &a && second == &b) ||
+           (first == &b && second == &a));
+    assert(third == NULL);
+
+    dshmap_iter iter;
+    dshmap_iter_hash_init(&iter, &map, target_hash);
+    first = dshmap_iter_hash_next_with_hash_fn(
+        &map, &iter, supplied_counted_entry_hash);
+    second = dshmap_iter_hash_next_with_hash_fn(
+        &map, &iter, supplied_counted_entry_hash);
+    third = dshmap_iter_hash_next_with_hash_fn(
+        &map, &iter, supplied_counted_entry_hash);
+
+    assert((first == &a && second == &b) ||
+           (first == &b && second == &a));
+    assert(third == NULL);
+    assert(counted_hash_calls == 0);
+    assert(supplied_hash_calls == 0);
+
+    assert(dshmap_find_with_hash_fn(
+        &map, 0x99, supplied_counted_entry_hash) == NULL);
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_find_with_hash_fn_uses_supplied_hash(void)
 {
     dshmap map;
@@ -2210,6 +2285,20 @@ test_find_with_hash_fn_uses_supplied_hash(void)
     assert(supplied_hash_calls == 0);
 #else
     assert(supplied_hash_calls > 0);
+#endif
+
+    counted_hash_calls = 0;
+    first = dshmap_find_with_hash_fn(&map, target_hash, NULL);
+    second = dshmap_find_next_with_hash_fn(&map, target_hash, first, NULL);
+    third = dshmap_find_next_with_hash_fn(&map, target_hash, second, NULL);
+
+    assert((first == &a && second == &b) ||
+           (first == &b && second == &a));
+    assert(third == NULL);
+#if DSHMAP_SWISS_STORE_HASHES
+    assert(counted_hash_calls == 0);
+#else
+    assert(counted_hash_calls > 0);
 #endif
 
     dshmap_destroy(&map);
@@ -2996,8 +3085,10 @@ main(void)
     RUN_TEST(test_shard_iteration_swiss_table);
     RUN_TEST(test_for_each_shard_evaluates_args_once);
     RUN_TEST(test_hash_iterator_api);
+    RUN_TEST(test_hash_iterators_empty_table);
     RUN_TEST(test_hash_candidate_iterator_small_table);
     RUN_TEST(test_hash_candidate_iterator_swiss_table);
+    RUN_TEST(test_with_hash_fn_small_table);
     RUN_TEST(test_find_with_hash_fn_uses_supplied_hash);
     RUN_TEST(test_hash_iterator_with_hash_fn_uses_supplied_hash);
     RUN_TEST(test_swiss_iter_next_after);
