@@ -17,17 +17,18 @@
 #if DSHMAP_DISABLE_SIMD && DSHMAP__GROUP_WIDTH != 8
 #error "SWAR control backend must use 8-slot groups"
 #endif
-#if !DSHMAP_DISABLE_SIMD && defined(__GNUC__) && !defined(__clang__) && \
-    defined(__SSE2__) && !defined(__AVX2__) && !DSHMAP__BACKEND_SWAR
-#error "GCC x86 without AVX2 must default to the SWAR control backend"
+#if defined(__i386__) || defined(__x86_64__)
+#define TEST_X86 1
+#else
+#define TEST_X86 0
 #endif
-#if !DSHMAP_DISABLE_SIMD && defined(__AVX2__) && defined(__SSE2__) && \
+#if !DSHMAP_DISABLE_SIMD && TEST_X86 && !defined(__AVX2__) && \
+    !DSHMAP__BACKEND_SWAR
+#error "x86 targets without AVX2 must default to the SWAR control backend"
+#endif
+#if !DSHMAP_DISABLE_SIMD && TEST_X86 && defined(__AVX2__) && \
     !DSHMAP__BACKEND_X86
 #error "AVX2 x86 targets must use the x86 SIMD control backend"
-#endif
-#if !DSHMAP_DISABLE_SIMD && defined(__clang__) && defined(__SSE2__) && \
-    !defined(__AVX2__) && !DSHMAP__BACKEND_SWAR
-#error "Clang x86 without AVX2 must default to the SWAR control backend"
 #endif
 #if (DSHMAP__BACKEND_X86 || DSHMAP__BACKEND_NEON) && DSHMAP__GROUP_WIDTH != 16
 #error "SIMD control backends must use 16-slot groups"

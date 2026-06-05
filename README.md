@@ -123,10 +123,10 @@ benchmarks:
 - NEON on ARM targets
 - SWAR otherwise
 
-x86 builds without AVX2 use SWAR by default because the generic SSE2 path was
-slower for successful key lookups in profiling. Compile with `-mavx2` or
-`-march=native` if you want the x86 SIMD backend where supported. To force the
-fallback, define `DSHMAP_DISABLE_SIMD` before including `dshmap.h`:
+x86 builds use SIMD only when AVX2 is enabled; otherwise they use SWAR. Compile
+with `-mavx2` or `-march=native` if you want the x86 SIMD backend where
+supported. To force the fallback, define `DSHMAP_DISABLE_SIMD` before including
+`dshmap.h`:
 
 ```c
 #define DSHMAP_DISABLE_SIMD 1

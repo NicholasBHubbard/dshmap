@@ -116,9 +116,9 @@ extern "C" {
  * - NEON on ARM targets
  * - SWAR otherwise
  *
- * x86 builds without AVX2 use SWAR by default because the generic SSE2 path
- * was slower for successful key lookups in profiling. Define this as 1 before
- * including dshmap.h to disable SIMD and force the SWAR fallback.
+ * x86 builds use SIMD only when AVX2 is enabled; otherwise they use SWAR.
+ * Define this as 1 before including dshmap.h to disable SIMD and force the
+ * SWAR fallback.
  *
  *     #define DSHMAP_DISABLE_SIMD 1
  *     #include "dshmap.h"
