@@ -1238,6 +1238,44 @@ test_remove(void)
 }
 
 static void
+test_remove_does_not_rehash_candidates(void)
+{
+    dshmap map;
+    dshmap_init(&map, counted_entry_hash);
+    test_force_swiss(&map, 32);
+
+    size_t groups = map.group_mask + 1;
+    dshmap_hash_t target_hash = 0x2A;
+    struct counted_entry target = { .key = 1, .hash = target_hash };
+    struct counted_entry noise1 = {
+        .key = 2,
+        .hash = ((dshmap_hash_t)groups << 7) | dshmap__h2(target_hash),
+    };
+    struct counted_entry noise2 = {
+        .key = 3,
+        .hash = ((dshmap_hash_t)(groups * 2) << 7) | dshmap__h2(target_hash),
+    };
+
+    dshmap_insert(&map, &noise1, noise1.hash);
+    dshmap_insert(&map, &target, target.hash);
+    dshmap_insert(&map, &noise2, noise2.hash);
+
+    counted_hash_calls = 0;
+    dshmap_remove(&map, &target, target_hash);
+
+    assert(counted_hash_calls == 0);
+    assert(dshmap_size(&map) == 2);
+    assert(dshmap_find_key(&map, target_hash, &target.key,
+                           counted_entry_eq) == NULL);
+    assert(dshmap_find_key(&map, noise1.hash, &noise1.key,
+                           counted_entry_eq) == &noise1);
+    assert(dshmap_find_key(&map, noise2.hash, &noise2.key,
+                           counted_entry_eq) == &noise2);
+
+    dshmap_destroy(&map);
+}
+
+static void
 test_clear(void)
 {
     dshmap map;
@@ -2933,6 +2971,7 @@ main(void)
     RUN_TEST(test_reserve_above_small_threshold_uses_swiss);
     RUN_TEST(test_swiss_hash_storage_policy);
     RUN_TEST(test_remove);
+    RUN_TEST(test_remove_does_not_rehash_candidates);
     RUN_TEST(test_clear);
     RUN_TEST(test_clear_after_tombstone_heavy_table);
     RUN_TEST(test_reserve);

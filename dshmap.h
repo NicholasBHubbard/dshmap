@@ -1131,9 +1131,11 @@ dshmap__small_cap_for_count(size_t count)
 static inline dshmap_hash_t
 dshmap__slot_hash(const dshmap *map, size_t pos)
 {
+#if DSHMAP_SWISS_STORE_HASHES
     if (map->hashes != NULL) {
         return map->hashes[pos];
     }
+#endif
     return map->hash_fn(map->slots[pos]);
 }
 
@@ -1141,18 +1143,26 @@ static inline dshmap_hash_t
 dshmap__slot_hash_with_hash_fn(const dshmap *map, size_t pos,
                                dshmap_hash_fn hash_fn)
 {
+#if DSHMAP_SWISS_STORE_HASHES
     if (map->hashes != NULL) {
         return map->hashes[pos];
     }
+#endif
     return hash_fn(map->slots[pos]);
 }
 
 static inline void
 dshmap__set_slot_hash(dshmap *map, size_t pos, dshmap_hash_t hash)
 {
+#if DSHMAP_SWISS_STORE_HASHES
     if (map->hashes != NULL) {
         map->hashes[pos] = hash;
     }
+#else
+    (void)map;
+    (void)pos;
+    (void)hash;
+#endif
 }
 
 static inline size_t
@@ -1916,8 +1926,12 @@ dshmap_iter_next_after_hash(const dshmap *map, const void *entry,
         while (match) {
             size_t slot = dshmap__ctrl_next_match(&match);
             size_t pos = dshmap__slot_pos(group, slot);
+#if DSHMAP_SWISS_STORE_HASHES
             if ((map->hashes == NULL || map->hashes[pos] == hash) &&
                 map->slots[pos] == entry) {
+#else
+            if (map->slots[pos] == entry) {
+#endif
                 dshmap__ctrl_mask occupied = dshmap__ctrl_occupied(ctrl);
                 while (occupied) {
                     size_t next_slot = dshmap__ctrl_next_match(&occupied);
@@ -2170,13 +2184,19 @@ dshmap_find_key(const dshmap *map, dshmap_hash_t hash, const void *key,
         uint8_t h2 = dshmap__h2(hash);
         DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
             dshmap__ctrl_mask match = dshmap__ctrl_match(ctrl, h2);
-            while (match) {
-                size_t pos = dshmap__slot_pos(index,
-                                              dshmap__ctrl_next_match(&match));
-                if ((map->hashes == NULL || map->hashes[pos] == hash) &&
-                    eq_fn(map->slots[pos], key)) {
-                    return map->slots[pos];
-                }
+            if (DSHMAP__UNLIKELY(match)) {
+                do {
+                    size_t pos = dshmap__slot_pos(
+                        index, dshmap__ctrl_next_match(&match));
+#if DSHMAP_SWISS_STORE_HASHES
+                    if ((map->hashes == NULL || map->hashes[pos] == hash) &&
+                        eq_fn(map->slots[pos], key)) {
+#else
+                    if (eq_fn(map->slots[pos], key)) {
+#endif
+                        return map->slots[pos];
+                    }
+                } while (match);
             }
 
             if (dshmap__group_has_empty(ctrl)) {
@@ -2222,8 +2242,12 @@ dshmap_find_key_next(const dshmap *map, dshmap_hash_t hash, const void *key,
                     }
                     continue;
                 }
+#if DSHMAP_SWISS_STORE_HASHES
                 if ((map->hashes == NULL || map->hashes[pos] == hash) &&
                     eq_fn(map->slots[pos], key)) {
+#else
+                if (eq_fn(map->slots[pos], key)) {
+#endif
                     return map->slots[pos];
                 }
             }
@@ -2259,13 +2283,19 @@ dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash)
             while (match) {
                 size_t pos = dshmap__slot_pos(index,
                                               dshmap__ctrl_next_match(&match));
+#if DSHMAP_SWISS_STORE_HASHES
                 if ((map->hashes == NULL || map->hashes[pos] == hash) &&
                     map->slots[pos] == entry) {
+#else
+                if (map->slots[pos] == entry) {
+#endif
                     dshmap__ctrl_mask empty = dshmap__group_has_empty(ctrl);
                     map->ctrl[pos] = empty ? DSHMAP__EMPTY : DSHMAP__DELETED;
+#if DSHMAP_SWISS_STORE_HASHES
                     if (map->hashes != NULL) {
                         map->hashes[pos] = 0;
                     }
+#endif
                     map->slots[pos] = NULL;
                     map->size--;
                     if (empty) {
