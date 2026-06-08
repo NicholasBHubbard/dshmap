@@ -36,6 +36,25 @@
 #if DSHMAP__BACKEND_SWAR && DSHMAP__GROUP_WIDTH != 8
 #error "SWAR control backend must use 8-slot groups"
 #endif
+#ifndef DSHMAP_MODE_AUTO
+#error "dshmap.h must define DSHMAP_MODE_AUTO"
+#endif
+#ifndef DSHMAP_MODE_CHAIN_ONLY
+#error "dshmap.h must define DSHMAP_MODE_CHAIN_ONLY"
+#endif
+#ifndef DSHMAP_MODE_SWISS_ONLY
+#error "dshmap.h must define DSHMAP_MODE_SWISS_ONLY"
+#endif
+#ifndef DSHMAP_MODE
+#error "dshmap.h must define DSHMAP_MODE"
+#endif
+
+#define TEST_HAS_CHAIN_LAYOUT \
+    (DSHMAP_MODE != DSHMAP_MODE_SWISS_ONLY && \
+     (DSHMAP_MODE == DSHMAP_MODE_CHAIN_ONLY || DSHMAP_SMALL_THRESHOLD != 0))
+#define TEST_HAS_SWISS_LAYOUT (DSHMAP_MODE != DSHMAP_MODE_CHAIN_ONLY)
+#define TEST_HAS_PROMOTION \
+    (DSHMAP_MODE == DSHMAP_MODE_AUTO && DSHMAP_SMALL_THRESHOLD != 0)
 
 #define RUN_TEST(fn) do { printf("  %-40s ", #fn); fn(); printf("ok\n"); } while (0)
 
@@ -76,8 +95,10 @@ test_swiss_group_mask_for_count(size_t count)
 static void
 test_force_swiss(dshmap *map, size_t count)
 {
+    assert(TEST_HAS_SWISS_LAYOUT);
+
     size_t reserve_count = count;
-#if DSHMAP_SMALL_THRESHOLD != 0
+#if DSHMAP_MODE == DSHMAP_MODE_AUTO && DSHMAP_SMALL_THRESHOLD != 0
     if (reserve_count <= DSHMAP_SMALL_THRESHOLD) {
         reserve_count = (size_t)DSHMAP_SMALL_THRESHOLD + 1;
     }
@@ -98,6 +119,39 @@ test_lifecycle(void)
     dshmap_init(&map, dummy_hash);
     assert(dshmap_size(&map) == 0);
     assert(dshmap_is_empty(&map));
+    dshmap_destroy(&map);
+}
+
+static void
+test_compile_time_algorithm_mode(void)
+{
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+
+    assert(DSHMAP_MODE_AUTO == 0);
+    assert(DSHMAP_MODE_CHAIN_ONLY == 1);
+    assert(DSHMAP_MODE_SWISS_ONLY == 2);
+
+#if DSHMAP_MODE == DSHMAP_MODE_CHAIN_ONLY
+    size_t count = (size_t)DSHMAP_SMALL_THRESHOLD + 16;
+    if (count < 64) {
+        count = 64;
+    }
+    dshmap_reserve(&map, count);
+    assert(map.small);
+    assert(dshmap_capacity(&map) >= count);
+    for (size_t i = 1; i <= count; i++) {
+        dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
+    }
+    assert(map.small);
+#elif DSHMAP_MODE == DSHMAP_MODE_SWISS_ONLY
+    dshmap_insert(&map, (void *)1, dummy_hash((void *)1));
+    assert(!map.small);
+    assert(dshmap_capacity(&map) >= 1);
+#else
+    assert(DSHMAP_MODE == DSHMAP_MODE_AUTO);
+#endif
+
     dshmap_destroy(&map);
 }
 
@@ -618,6 +672,10 @@ test_reuse_deep_tombstone_before_grow(void)
 static void
 test_swiss_reuses_tombstone_before_growth(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, dummy_hash);
     test_force_swiss(&map, 32);
@@ -649,9 +707,16 @@ test_swiss_reuses_tombstone_before_growth(void)
 static void
 test_swiss_single_group_upper_half(void)
 {
-#if DSHMAP_SMALL_THRESHOLD != 0 || DSHMAP__GROUP_WIDTH != 16
+#if DSHMAP__GROUP_WIDTH != 16
+    return;
+#endif
+#if DSHMAP_MODE == DSHMAP_MODE_AUTO && DSHMAP_SMALL_THRESHOLD != 0
     return;
 #else
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, hashed_entry_hash);
 
@@ -796,6 +861,10 @@ test_find_key_skips_same_h2_noise(void)
 static void
 test_swiss_find_key_miss_paths(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, hashed_entry_hash);
     test_force_swiss(&map, 16);
@@ -825,7 +894,7 @@ static void
 test_small_hash_storage_policy(void)
 {
     size_t threshold = DSHMAP_SMALL_THRESHOLD;
-    if (threshold == 0) {
+    if (!TEST_HAS_CHAIN_LAYOUT || threshold == 0) {
         return;
     }
 
@@ -861,7 +930,7 @@ static void
 test_small_mode_uses_pooled_chaining(void)
 {
     size_t threshold = DSHMAP_SMALL_THRESHOLD;
-    if (threshold < 4) {
+    if (!TEST_HAS_CHAIN_LAYOUT || threshold < 4) {
         return;
     }
 
@@ -894,7 +963,7 @@ static void
 test_small_remove_preserves_chain(void)
 {
     size_t threshold = DSHMAP_SMALL_THRESHOLD;
-    if (threshold < 8) {
+    if (!TEST_HAS_CHAIN_LAYOUT || threshold < 8) {
         return;
     }
 
@@ -931,7 +1000,7 @@ static void
 test_small_mode_reuses_free_list_nodes(void)
 {
     size_t threshold = DSHMAP_SMALL_THRESHOLD;
-    if (threshold < 8) {
+    if (!TEST_HAS_CHAIN_LAYOUT || threshold < 8) {
         return;
     }
 
@@ -967,7 +1036,7 @@ static void
 test_small_promotes_to_swiss_at_threshold(void)
 {
     size_t threshold = DSHMAP_SMALL_THRESHOLD;
-    if (threshold == 0) {
+    if (!TEST_HAS_PROMOTION) {
         return;
     }
 
@@ -1008,7 +1077,7 @@ static void
 test_small_to_swiss_post_promotion_operations(void)
 {
     size_t threshold = DSHMAP_SMALL_THRESHOLD;
-    if (threshold < 4) {
+    if (!TEST_HAS_PROMOTION || threshold < 4) {
         return;
     }
 
@@ -1136,7 +1205,7 @@ static void
 test_reserve_above_small_threshold_uses_swiss(void)
 {
     size_t threshold = DSHMAP_SMALL_THRESHOLD;
-    if (threshold == 0) {
+    if (!TEST_HAS_SWISS_LAYOUT || threshold == 0) {
         return;
     }
 
@@ -1169,6 +1238,10 @@ test_reserve_above_small_threshold_uses_swiss(void)
 static void
 test_swiss_hash_storage_policy(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, counted_entry_hash);
 
@@ -1240,6 +1313,10 @@ test_remove(void)
 static void
 test_remove_does_not_rehash_candidates(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, counted_entry_hash);
     test_force_swiss(&map, 32);
@@ -1414,7 +1491,7 @@ static void
 test_reserve_promotes_small_table(void)
 {
     size_t threshold = DSHMAP_SMALL_THRESHOLD;
-    if (threshold == 0) {
+    if (!TEST_HAS_PROMOTION) {
         return;
     }
 
@@ -1436,6 +1513,10 @@ test_reserve_promotes_small_table(void)
 static void
 test_swiss_reserve_noop_and_growth(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     size_t reserve_n = (size_t)DSHMAP_SMALL_THRESHOLD + 1;
     if (reserve_n < 16) {
         reserve_n = 16;
@@ -1509,7 +1590,7 @@ test_capacity_empty(void)
 static void
 test_capacity_small_table(void)
 {
-#if DSHMAP_SMALL_THRESHOLD == 0
+#if !TEST_HAS_CHAIN_LAYOUT || DSHMAP_SMALL_THRESHOLD == 0
     return;
 #else
     dshmap map;
@@ -1539,6 +1620,10 @@ test_capacity_small_table(void)
 static void
 test_capacity_swiss_table(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, hashed_entry_hash);
     test_force_swiss(&map, 128);
@@ -1594,7 +1679,7 @@ test_shrink_empty_frees_storage(void)
 static void
 test_shrink_small_table(void)
 {
-#if DSHMAP_SMALL_THRESHOLD < 8
+#if !TEST_HAS_CHAIN_LAYOUT || DSHMAP_SMALL_THRESHOLD < 8
     return;
 #else
     dshmap map;
@@ -1628,6 +1713,10 @@ test_shrink_small_table(void)
 static void
 test_shrink_swiss_table_does_not_demote(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, hashed_entry_hash);
     test_force_swiss(&map, 128);
@@ -1878,7 +1967,7 @@ test_shard_iteration_empty(void)
 static void
 test_shard_iteration_small_table(void)
 {
-    if (DSHMAP_SMALL_THRESHOLD < 12) {
+    if (!TEST_HAS_CHAIN_LAYOUT || DSHMAP_SMALL_THRESHOLD < 12) {
         return;
     }
 
@@ -1918,6 +2007,10 @@ test_shard_iteration_small_table(void)
 static void
 test_shard_iteration_swiss_table(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, hashed_entry_hash);
     test_force_swiss(&map, 80);
@@ -2020,9 +2113,8 @@ test_hash_iterator_api(void)
     dshmap_iter_hash_init(&iter, &map, 0x1234);
     assert(dshmap_iter_hash_next(&map, &iter) == NULL);
 
-#if DSHMAP_SMALL_THRESHOLD != 0
+#if TEST_HAS_SWISS_LAYOUT && DSHMAP_SMALL_THRESHOLD != 0
     dshmap_reserve(&map, DSHMAP_SMALL_THRESHOLD + 1);
-#endif
     assert(!map.small);
 
     dshmap_iter_hash_init(&iter, &map, target_hash);
@@ -2042,6 +2134,7 @@ test_hash_iterator_api(void)
 
     dshmap_iter_hash_init(&iter, &map, 0x1234);
     assert(dshmap_iter_hash_next(&map, &iter) == NULL);
+#endif
 
     dshmap_destroy(&map);
 }
@@ -2069,7 +2162,7 @@ test_hash_iterators_empty_table(void)
 static void
 test_hash_candidate_iterator_small_table(void)
 {
-    if (DSHMAP_SMALL_THRESHOLD < 8) {
+    if (!TEST_HAS_CHAIN_LAYOUT || DSHMAP_SMALL_THRESHOLD < 8) {
         return;
     }
 
@@ -2124,6 +2217,10 @@ test_hash_candidate_iterator_small_table(void)
 static void
 test_hash_candidate_iterator_swiss_table(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, counted_entry_hash);
     test_force_swiss(&map, 32);
@@ -2190,7 +2287,7 @@ test_hash_candidate_iterator_swiss_table(void)
 static void
 test_with_hash_fn_small_table(void)
 {
-    if (DSHMAP_SMALL_THRESHOLD < 4) {
+    if (!TEST_HAS_CHAIN_LAYOUT || DSHMAP_SMALL_THRESHOLD < 4) {
         return;
     }
 
@@ -2245,6 +2342,10 @@ test_with_hash_fn_small_table(void)
 static void
 test_find_with_hash_fn_uses_supplied_hash(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, counted_entry_hash);
     test_force_swiss(&map, 32);
@@ -2307,6 +2408,10 @@ test_find_with_hash_fn_uses_supplied_hash(void)
 static void
 test_hash_iterator_with_hash_fn_uses_supplied_hash(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, counted_entry_hash);
     test_force_swiss(&map, 32);
@@ -2363,6 +2468,10 @@ test_hash_iterator_with_hash_fn_uses_supplied_hash(void)
 static void
 test_swiss_iter_next_after(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, dummy_hash);
 
@@ -2399,7 +2508,7 @@ test_swiss_iter_next_after(void)
 static void
 test_small_iter_next_after_hash(void)
 {
-    if (DSHMAP_SMALL_THRESHOLD < 8) {
+    if (!TEST_HAS_CHAIN_LAYOUT || DSHMAP_SMALL_THRESHOLD < 8) {
         return;
     }
 
@@ -2448,6 +2557,10 @@ test_small_iter_next_after_hash(void)
 static void
 test_swiss_iter_next_after_hash(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, hashed_entry_hash);
 
@@ -2495,7 +2608,7 @@ test_swiss_iter_next_after_hash(void)
 static void
 test_safe_iteration_removes_small_chain(void)
 {
-    if (DSHMAP_SMALL_THRESHOLD < 8) {
+    if (!TEST_HAS_CHAIN_LAYOUT || DSHMAP_SMALL_THRESHOLD < 8) {
         return;
     }
 
@@ -2534,6 +2647,10 @@ test_safe_iteration_removes_small_chain(void)
 static void
 test_safe_iteration_removes_swiss_table(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, hashed_entry_hash);
 
@@ -2702,10 +2819,14 @@ test_churn(void)
 static void
 test_load_factor_boundary(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, dummy_hash);
 
-#if DSHMAP_SMALL_THRESHOLD != 0
+#if DSHMAP_MODE == DSHMAP_MODE_AUTO && DSHMAP_SMALL_THRESHOLD != 0
     dshmap_reserve(&map, DSHMAP_SMALL_THRESHOLD + 1);
     assert(!map.small);
 #endif
@@ -2726,10 +2847,14 @@ test_load_factor_boundary(void)
 static void
 test_remove_empty_slot_restores_growth(void)
 {
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
     dshmap map;
     dshmap_init(&map, dummy_hash);
 
-#if DSHMAP_SMALL_THRESHOLD != 0
+#if DSHMAP_MODE == DSHMAP_MODE_AUTO && DSHMAP_SMALL_THRESHOLD != 0
     dshmap_reserve(&map, DSHMAP_SMALL_THRESHOLD + 1);
     assert(!map.small);
 #endif
@@ -2899,9 +3024,8 @@ test_for_each_with_hash(void)
     assert(macro_hash_calls == 1);
     assert(macro_map_calls == 1);
 
-#if DSHMAP_SMALL_THRESHOLD != 0
+#if TEST_HAS_SWISS_LAYOUT && DSHMAP_SMALL_THRESHOLD != 0
     dshmap_reserve(&map, DSHMAP_SMALL_THRESHOLD + 1);
-#endif
     assert(!map.small);
 
     count = 0;
@@ -2915,6 +3039,7 @@ test_for_each_with_hash(void)
     }
     assert(count == 3);
     assert(found_a && found_b && found_c);
+#endif
 
     dshmap_destroy(&map);
 }
@@ -3036,6 +3161,7 @@ main(void)
 {
     printf("dshmap tests:\n");
     RUN_TEST(test_lifecycle);
+    RUN_TEST(test_compile_time_algorithm_mode);
     RUN_TEST(test_static_initializer);
     RUN_TEST(test_insert_find);
     RUN_TEST(test_insert_multiple);

@@ -44,6 +44,8 @@ test-config-matrix: tests/test.c dshmap.h
 	for cfg in \
 	    "swiss_hashes_on:-DDSHMAP_SWISS_STORE_HASHES=1" \
 	    "small_disabled:-DDSHMAP_SMALL_THRESHOLD=0" \
+	    "chain_only:-DDSHMAP_MODE=DSHMAP_MODE_CHAIN_ONLY" \
+	    "swiss_only:-DDSHMAP_MODE=DSHMAP_MODE_SWISS_ONLY" \
 	    "tiny_small:-DDSHMAP_SMALL_THRESHOLD=1" \
 	    "odd_small:-DDSHMAP_SMALL_THRESHOLD=3" \
 	    "swar_fallback:-DDSHMAP_DISABLE_SIMD=1" \

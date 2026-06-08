@@ -5,6 +5,7 @@ dshmap is a header only C99 Swiss-style hash map with a small-table fast path.
 ## Features
 
 - **Hybrid layout**: small tables use pooled separate chaining, then promote to the Swiss-table layout after `DSHMAP_SMALL_THRESHOLD` entries
+- **Compile-time algorithm selection**: use the default hybrid mode, force pooled chaining, or force Swiss-only operation
 - **Scale-oriented**: flat layouts reduce pointer chasing and cache misses; the largest Swiss-table wins show up on large tables, especially misses, iteration, and memory use ([see benchmarks](#benchmarks))
 - **Cache-friendly**: small mode keeps bucket heads and nodes in one allocation; Swiss mode uses contiguous control bytes and slots
 - **SIMD/SWAR control matching**: uses x86 SIMD on AVX2 targets, NEON on ARM, and SWAR otherwise
@@ -100,6 +101,23 @@ and as an iteration sentinel.
 Define `DSHMAP_SMALL_THRESHOLD` before including `dshmap.h` to tune the hybrid
 cutover. The default is `2048`. Define it as `0` to disable small mode and use
 the Swiss layout from the first insertion.
+
+Define `DSHMAP_MODE` before including `dshmap.h` to force one algorithm:
+
+```c
+#define DSHMAP_MODE DSHMAP_MODE_SWISS_ONLY
+#include "dshmap.h"
+```
+
+Available modes:
+
+- `DSHMAP_MODE_AUTO`: default hybrid mode
+- `DSHMAP_MODE_CHAIN_ONLY`: pooled separate chaining only
+- `DSHMAP_MODE_SWISS_ONLY`: Swiss layout only
+
+Forced modes keep `sizeof(dshmap)` the same, but the public operations compile
+down to the selected algorithm path. `DSHMAP_SMALL_THRESHOLD` controls promotion
+only in auto mode.
 
 Small mode always stores the full hash in each pooled node. Swiss hash storage
 is configurable. Define this macro before including `dshmap.h`:
