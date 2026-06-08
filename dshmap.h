@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
 #ifndef DSHMAP_H
 #define DSHMAP_H
 
