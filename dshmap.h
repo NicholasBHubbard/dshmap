@@ -1213,9 +1213,7 @@ static inline dshmap_hash_t
 dshmap__slot_hash(const dshmap *map, size_t pos)
 {
 #if DSHMAP_SWISS_STORE_HASHES
-    if (map->hashes != NULL) {
-        return map->hashes[pos];
-    }
+    return map->hashes[pos];
 #endif
     return map->hash_fn(map->slots[pos]);
 }
@@ -1225,9 +1223,7 @@ dshmap__slot_hash_with_hash_fn(const dshmap *map, size_t pos,
                                dshmap_hash_fn hash_fn)
 {
 #if DSHMAP_SWISS_STORE_HASHES
-    if (map->hashes != NULL) {
-        return map->hashes[pos];
-    }
+    return map->hashes[pos];
 #endif
     return hash_fn(map->slots[pos]);
 }
@@ -1236,9 +1232,7 @@ static inline void
 dshmap__set_slot_hash(dshmap *map, size_t pos, dshmap_hash_t hash)
 {
 #if DSHMAP_SWISS_STORE_HASHES
-    if (map->hashes != NULL) {
-        map->hashes[pos] = hash;
-    }
+    map->hashes[pos] = hash;
 #else
     (void)map;
     (void)pos;
@@ -1346,7 +1340,9 @@ dshmap__swiss_grow_to(dshmap *map, size_t new_groups)
     size_t old_cap = dshmap__capacity_from_groups(old_groups);
     int8_t *old_ctrl = map->ctrl;
     void **old_slots = map->slots;
+#if DSHMAP_SWISS_STORE_HASHES
     dshmap_hash_t *old_hashes = map->hashes;
+#endif
     bool was_allocated = dshmap__is_allocated(map);
 
     size_t new_cap = dshmap__capacity_from_groups(new_groups);
@@ -1363,8 +1359,11 @@ dshmap__swiss_grow_to(dshmap *map, size_t new_groups)
             dshmap__ctrl_mask occ = dshmap__ctrl_occupied(ctrl);
             while (occ) {
                 size_t pos = dshmap__slot_pos(g, dshmap__ctrl_next_match(&occ));
-                dshmap_hash_t hash = old_hashes != NULL ?
-                    old_hashes[pos] : map->hash_fn(old_slots[pos]);
+#if DSHMAP_SWISS_STORE_HASHES
+                dshmap_hash_t hash = old_hashes[pos];
+#else
+                dshmap_hash_t hash = map->hash_fn(old_slots[pos]);
+#endif
                 dshmap__swiss_insert_no_grow(map, old_slots[pos], hash);
             }
         }
@@ -2024,8 +2023,7 @@ dshmap_iter_next_after_hash(const dshmap *map, const void *entry,
             size_t slot = dshmap__ctrl_next_match(&match);
             size_t pos = dshmap__slot_pos(group, slot);
 #if DSHMAP_SWISS_STORE_HASHES
-            if ((map->hashes == NULL || map->hashes[pos] == hash) &&
-                map->slots[pos] == entry) {
+            if (map->hashes[pos] == hash && map->slots[pos] == entry) {
 #else
             if (map->slots[pos] == entry) {
 #endif
@@ -2316,7 +2314,7 @@ dshmap_find_key(const dshmap *map, dshmap_hash_t hash, const void *key,
                     size_t pos = dshmap__slot_pos(
                         index, dshmap__ctrl_next_match(&match));
 #if DSHMAP_SWISS_STORE_HASHES
-                    if ((map->hashes == NULL || map->hashes[pos] == hash) &&
+                    if (map->hashes[pos] == hash &&
                         eq_fn(map->slots[pos], key)) {
 #else
                     if (eq_fn(map->slots[pos], key)) {
@@ -2374,7 +2372,7 @@ dshmap_find_key_next(const dshmap *map, dshmap_hash_t hash, const void *key,
                     continue;
                 }
 #if DSHMAP_SWISS_STORE_HASHES
-                if ((map->hashes == NULL || map->hashes[pos] == hash) &&
+                if (map->hashes[pos] == hash &&
                     eq_fn(map->slots[pos], key)) {
 #else
                 if (eq_fn(map->slots[pos], key)) {
@@ -2419,17 +2417,14 @@ dshmap_remove(dshmap *map, const void *entry, dshmap_hash_t hash)
                 size_t pos = dshmap__slot_pos(index,
                                               dshmap__ctrl_next_match(&match));
 #if DSHMAP_SWISS_STORE_HASHES
-                if ((map->hashes == NULL || map->hashes[pos] == hash) &&
-                    map->slots[pos] == entry) {
+                if (map->hashes[pos] == hash && map->slots[pos] == entry) {
 #else
                 if (map->slots[pos] == entry) {
 #endif
                     dshmap__ctrl_mask empty = dshmap__group_has_empty(ctrl);
                     map->ctrl[pos] = empty ? DSHMAP__EMPTY : DSHMAP__DELETED;
 #if DSHMAP_SWISS_STORE_HASHES
-                    if (map->hashes != NULL) {
-                        map->hashes[pos] = 0;
-                    }
+                    map->hashes[pos] = 0;
 #endif
                     map->slots[pos] = NULL;
                     map->size--;
