@@ -137,9 +137,14 @@ test_compile_time_algorithm_mode(void)
     if (count < 64) {
         count = 64;
     }
+    assert(!dshmap__is_small(&map));
     dshmap_reserve(&map, count);
+    assert(dshmap__is_small(&map));
     assert(map.small);
     assert(dshmap_capacity(&map) >= count);
+    map.small = false;
+    assert(dshmap__is_small(&map));
+    map.small = true;
     for (size_t i = 1; i <= count; i++) {
         dshmap_insert(&map, (void *)i, dummy_hash((void *)i));
     }

@@ -1080,6 +1080,8 @@ dshmap__is_small(const dshmap *map)
 #if DSHMAP_MODE == DSHMAP_MODE_SWISS_ONLY
     (void)map;
     return false;
+#elif DSHMAP_MODE == DSHMAP_MODE_CHAIN_ONLY
+    return dshmap__is_allocated(map);
 #else
     return map->small;
 #endif
