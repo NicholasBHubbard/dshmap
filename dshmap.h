@@ -4,7 +4,7 @@
 #define DSHMAP_H
 
 #define DSHMAP_VERSION_MAJOR 0
-#define DSHMAP_VERSION_MINOR 2
+#define DSHMAP_VERSION_MINOR 3
 #define DSHMAP_VERSION_PATCH 0
 
 #if !defined(__GNUC__) && !defined(__clang__)
@@ -429,6 +429,26 @@ dshmap_is_empty(const dshmap *map);
  */
 static inline void
 dshmap_insert(dshmap *map, void *entry, dshmap_hash_t hash);
+
+/* dshmap_insert_reserved - Insert into a table with pre-reserved capacity.
+ *
+ * This is the no-grow form of dshmap_insert(). Call dshmap_reserve() first
+ * with enough capacity for the final number of live entries, then use this
+ * function in a tight insert loop. It never allocates, resizes, shrinks, or
+ * promotes; it only inserts into the table's current layout.
+ *
+ * The caller must provide a non-NULL entry and a precomputed full hash. The
+ * table must already have room for the new entry in its current layout. If this
+ * precondition is not met, behavior is a caller error and may abort via
+ * DSHMAP_OOM().
+ *
+ *     dshmap_reserve(&map, n);
+ *     for (size_t i = 0; i < n; i++) {
+ *         dshmap_insert_reserved(&map, entries[i], hashes[i]);
+ *     }
+ */
+static inline void
+dshmap_insert_reserved(dshmap *map, void *entry, dshmap_hash_t hash);
 
 /* dshmap_find - Look up an entry by hash.
  *
@@ -1334,6 +1354,30 @@ dshmap__swiss_insert_no_grow(dshmap *map, void *entry, dshmap_hash_t hash)
 }
 
 static inline void
+dshmap__swiss_insert_reserved(dshmap *map, void *entry, dshmap_hash_t hash)
+{
+    uint8_t h2 = dshmap__h2(hash);
+
+    DSHMAP__FOR_EACH_GROUP(map, hash, index, ctrl) {
+        dshmap__ctrl_mask available = dshmap__ctrl_available(ctrl);
+        if (DSHMAP__LIKELY(available)) {
+            size_t pos = dshmap__slot_pos(index, dshmap__match_slot(available));
+            bool was_empty = (map->ctrl[pos] == DSHMAP__EMPTY);
+            map->ctrl[pos] = (int8_t)h2;
+            dshmap__set_slot_hash(map, pos, hash);
+            map->slots[pos] = entry;
+            map->size++;
+            if (DSHMAP__LIKELY(was_empty && map->growth_left != 0)) {
+                map->growth_left--;
+            }
+            return;
+        }
+    }
+
+    dshmap__oom();
+}
+
+static inline void
 dshmap__swiss_grow_to(dshmap *map, size_t new_groups)
 {
     size_t old_groups = dshmap__checked_add(map->group_mask, 1);
@@ -2095,6 +2139,20 @@ dshmap_insert(dshmap *map, void *entry, dshmap_hash_t hash)
         }
     } else {
         dshmap__swiss_insert(map, entry, hash);
+    }
+}
+
+static inline void
+dshmap_insert_reserved(dshmap *map, void *entry, dshmap_hash_t hash)
+{
+    if (DSHMAP__UNLIKELY(!dshmap__is_allocated(map))) {
+        dshmap__oom();
+    }
+
+    if (dshmap__has_small_layout(map)) {
+        dshmap__small_insert_no_grow(map, entry, hash);
+    } else {
+        dshmap__swiss_insert_reserved(map, entry, hash);
     }
 }
 

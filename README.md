@@ -42,7 +42,7 @@ int main(void) {
     dshmap_reserve(&map, 1000000);
 
     for (uintptr_t i = 1; i <= 1000000; i++)
-        dshmap_insert(&map, (void *)i, i);
+        dshmap_insert_reserved(&map, (void *)i, i);
 
     void *found = dshmap_find(&map, 500000);
     printf("found key %ld in %zu entries\n",
@@ -68,6 +68,7 @@ Full documentation is in `dshmap.h`.
 | `dshmap_size` | Number of entries |
 | `dshmap_is_empty` | Check if empty |
 | `dshmap_insert` | Insert a non-`NULL` entry; inserting the same entry pointer twice without removing it first is unsupported |
+| `dshmap_insert_reserved` | Insert after enough capacity has already been reserved; never resizes or promotes |
 | `dshmap_find` | Look up by hash; use `dshmap_find_key` when key equality matters |
 | `dshmap_find_next` | Continue a lookup through distinct entries with the same hash |
 | `dshmap_find_with_hash_fn` | Look up by hash using a caller-supplied hash accessor |
@@ -97,6 +98,11 @@ initialization. Tables initialized this way are ready to use and still need
 
 `NULL` entries are not supported. `dshmap` uses `NULL` as the lookup miss result
 and as an iteration sentinel.
+
+Use `dshmap_insert_reserved()` only after `dshmap_reserve()` has already made
+room for the final live entry count. It is useful for bulk construction because
+it skips growth and promotion checks, but the caller is responsible for having
+enough capacity.
 
 Define `DSHMAP_SMALL_THRESHOLD` before including `dshmap.h` to tune the hybrid
 cutover. The default is `2048`. Define it as `0` to disable small mode and use

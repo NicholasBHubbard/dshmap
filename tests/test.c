@@ -1460,6 +1460,82 @@ test_reserve(void)
 }
 
 static void
+test_insert_reserved_small_table(void)
+{
+    if (!TEST_HAS_CHAIN_LAYOUT) {
+        return;
+    }
+
+    dshmap map;
+    dshmap_init(&map, dummy_hash);
+
+    dshmap_reserve(&map, 8);
+    size_t capacity = dshmap_capacity(&map);
+    bool small = map.small;
+    size_t mask = map.group_mask;
+
+    for (size_t i = 1; i <= 8; i++) {
+        dshmap_insert_reserved(&map, (void *)i, dummy_hash((void *)i));
+    }
+
+    assert(dshmap_size(&map) == 8);
+    assert(dshmap_capacity(&map) == capacity);
+    assert(map.small == small);
+    assert(map.group_mask == mask);
+    for (size_t i = 1; i <= 8; i++) {
+        assert(dshmap_find(&map, dummy_hash((void *)i)) == (void *)i);
+    }
+
+    dshmap_destroy(&map);
+}
+
+static void
+test_insert_reserved_swiss_table(void)
+{
+    if (!TEST_HAS_SWISS_LAYOUT) {
+        return;
+    }
+
+    dshmap map;
+    dshmap_init(&map, hashed_entry_hash);
+
+    test_force_swiss(&map, test_swiss_count_for_groups(2));
+    size_t capacity = dshmap_capacity(&map);
+    size_t mask = map.group_mask;
+    size_t count = capacity;
+
+    struct hashed_entry *entries = malloc((count + 1) * sizeof *entries);
+    assert(entries != NULL);
+    for (size_t i = 0; i < count; i++) {
+        entries[i].key = (int)i;
+        entries[i].hash = ((dshmap_hash_t)(i * 4) << 7) | (i + 1);
+        dshmap_insert_reserved(&map, &entries[i], entries[i].hash);
+    }
+
+    assert(dshmap_size(&map) == count);
+    assert(dshmap_capacity(&map) == capacity);
+    assert(map.group_mask == mask);
+    for (size_t i = 0; i < count; i++) {
+        assert(dshmap_find(&map, entries[i].hash) == &entries[i]);
+    }
+
+    dshmap_remove(&map, &entries[0], entries[0].hash);
+    assert(dshmap_find(&map, entries[0].hash) == NULL);
+
+    entries[count].key = (int)count;
+    entries[count].hash = ((dshmap_hash_t)1234 << 7) | 77;
+    dshmap_insert_reserved(&map, &entries[count], entries[count].hash);
+
+    assert(dshmap_size(&map) == count);
+    assert(dshmap_capacity(&map) == capacity);
+    assert(map.group_mask == mask);
+    assert(dshmap_find(&map, entries[count].hash) == &entries[count]);
+
+    free(entries);
+    dshmap_destroy(&map);
+}
+
+static void
 test_reserve_zero_noop(void)
 {
     dshmap map;
@@ -3195,6 +3271,8 @@ main(void)
     RUN_TEST(test_clear);
     RUN_TEST(test_clear_after_tombstone_heavy_table);
     RUN_TEST(test_reserve);
+    RUN_TEST(test_insert_reserved_small_table);
+    RUN_TEST(test_insert_reserved_swiss_table);
     RUN_TEST(test_reserve_zero_noop);
     RUN_TEST(test_reserve_noop);
     RUN_TEST(test_reserve_promotes_small_table);

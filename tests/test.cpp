@@ -42,7 +42,7 @@ main()
     assert(dshmap_capacity(&map) >= 32);
 
     for (std::size_t i = 0; i < sizeof entries / sizeof entries[0]; i++) {
-        dshmap_insert(&map, &entries[i], entries[i].hash);
+        dshmap_insert_reserved(&map, &entries[i], entries[i].hash);
     }
 
     assert(dshmap_size(&map) == sizeof entries / sizeof entries[0]);
