@@ -492,3 +492,7 @@ Values are bytes per entry.
 
 The benchmark (`make bench`) uses Linux `perf_event_open` for hardware
 counters but falls back to wall-clock timing on other platforms.
+
+## AI Usage
+
+Claude and Codex were used substantially for implementation assistance of this library.
